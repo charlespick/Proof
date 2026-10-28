@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
@@ -19,7 +18,7 @@ public sealed class TokenMinter(SigningKeys keys, IOptions<IssuerOptions> option
         var claims = new Dictionary<string, object>
         {
             [JwtRegisteredClaimNames.Sub] = identity.VmId,
-            [JwtRegisteredClaimNames.Jti] = NewJti(),
+            [JwtRegisteredClaimNames.Jti] = ProofTokenIds.NewJti(),
             [ProofClaimNames.Host] = identity.Host,
         };
 
@@ -45,7 +44,4 @@ public sealed class TokenMinter(SigningKeys keys, IOptions<IssuerOptions> option
             SigningCredentials = keys.Credentials,
         });
     }
-
-    /// <summary>A random 128-bit token ID.</summary>
-    public static string NewJti() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
 }

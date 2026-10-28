@@ -187,7 +187,8 @@ public static class AllowlistParser
             });
             return new ECDsaSecurityKey(ecdsa) { KeyId = ProofKeys.ComputeKid(jwk) };
         }
-        catch (Exception ex) when (ex is CryptographicException or FormatException or ArgumentException)
+        // Windows CNG reports a point off the curve as PlatformNotSupportedException; Linux OpenSSL as CryptographicException.
+        catch (Exception ex) when (ex is CryptographicException or FormatException or ArgumentException or PlatformNotSupportedException)
         {
             throw new AllowlistException($"{where}.jwk is not a valid P-256 public key.", ex);
         }

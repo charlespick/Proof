@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Proof.Shared;
 
 namespace Proof.Issuer;
 
@@ -48,12 +49,7 @@ public sealed class IssuerOptionsValidator : IValidateOptions<IssuerOptions>
     {
         var errors = new List<string>();
 
-        if (!Uri.TryCreate(options.IssuerUrl, UriKind.Absolute, out var issuer)
-            || issuer.Scheme != Uri.UriSchemeHttps
-            || options.IssuerUrl.EndsWith('/')
-            || !string.IsNullOrEmpty(issuer.Query)
-            || !string.IsNullOrEmpty(issuer.Fragment)
-            || !string.IsNullOrEmpty(issuer.UserInfo))
+        if (!ProofIssuerUrl.IsValid(options.IssuerUrl))
         {
             errors.Add("Proof:IssuerUrl must be an absolute https URL with no trailing slash, query or fragment.");
         }

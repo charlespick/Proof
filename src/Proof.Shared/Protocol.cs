@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Security.Cryptography;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Proof.Shared;
@@ -51,6 +53,37 @@ public static class HostTokenPolicy
 public static class KvpKeys
 {
     public const string Token = "proof.v1.token";
+}
+
+/// <summary>KVP size limits, measured on a Windows Server 2025 Hyper-V host.</summary>
+public static class KvpLimits
+{
+    /// <summary>
+    /// The longest value the host accepts, in UTF-16 characters: 2048 bytes including the terminator.
+    /// <c>ModifyKvpItems</c> takes 1023 characters and refuses 1024 with error 32773.
+    /// </summary>
+    public const int MaxValueLength = 1023;
+}
+
+public static class ProofIssuerUrl
+{
+    /// <summary>
+    /// True for an issuer URL Proof accepts: absolute https with no trailing slash, query, fragment or user info.
+    /// It is the <c>iss</c> of issued JWTs and the <c>aud</c> of host tokens, so the refresher and issuer share one rule.
+    /// </summary>
+    public static bool IsValid([NotNullWhen(true)] string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var url)
+        && url.Scheme == Uri.UriSchemeHttps
+        && !value.EndsWith('/')
+        && string.IsNullOrEmpty(url.Query)
+        && string.IsNullOrEmpty(url.Fragment)
+        && string.IsNullOrEmpty(url.UserInfo);
+}
+
+public static class ProofTokenIds
+{
+    /// <summary>A random 128-bit <c>jti</c>, as lowercase hex.</summary>
+    public static string NewJti() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
 }
 
 /// <summary>RFC 8693 token exchange identifiers.</summary>

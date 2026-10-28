@@ -30,7 +30,7 @@ Proof lets a Hyper-V VM prove which VM it is to on-premises services, using a sh
 
 ## 2. Decision log
 
-Twelve decisions are settled or proposed. "Decided" means you chose it in our discussion. "Proposed" means I recommend it and you have not confirmed it.
+Thirteen decisions are settled or proposed. "Decided" means you chose it in our discussion. "Proposed" means I recommend it and you have not confirmed it.
 
 | # | Decision | Reason | Status |
 | --- | --- | --- | --- |
@@ -43,9 +43,10 @@ Twelve decisions are settled or proposed. "Decided" means you chose it in our di
 | 7 | Audience-specific tokens are requested on demand through RFC 8693 token exchange. The KVP token has one fixed audience (the issuer) | An OIDC audience cannot be minted ahead of time | Decided |
 | 8 | No metadata service, cloud-init or Cloudbase-Init. The host writes the token over KVP and a small VM client fetches JWTs | Smaller moving parts | Decided |
 | 9 | Issuer and VM client are also C#/.NET | One language and one JOSE library family across all components; garbage-collected and compiled; runs on Linux | Proposed |
-| 10 | ES256 (ECDSA P-256) for host tokens and issued tokens; RS256 only if a federation target requires it | Small signatures, TPM-friendly, accepted by GCP | Proposed |
+| 10 | ES256 (ECDSA P-256) for host tokens and issued tokens; RS256 only if a federation target requires it | Small signatures, built into Windows CNG, accepted by GCP | Proposed |
 | 11 | Verification logic is not a Proof deliverable: consumers verify issued JWTs with standard OIDC and JWT libraries, as they would any OIDC token | OIDC is the common standard, so consumers use the validation they already have | Proposed |
 | 12 | The issuer runs on Linux as a Kubernetes Deployment, and its configuration and host allowlist are delivered by your existing GitOps | Fits your platform, and changes go through the review you already have | Decided |
+| 13 | Host keys are non-exportable CNG machine keys in the Microsoft Software Key Storage Provider. No TPM | Every Windows host has it; no hardware dependency or per-host variation | Decided |
 
 ## 3. Architecture
 
@@ -53,7 +54,7 @@ The host signs a token into each VM's KVP, and the VM trades that token for audi
 
 &#91;embedded content: architecture · 4 groups, 5 numbered flows\]
 
-1. The refresher signs a host token with the host key and writes it to the VM's KVP pool about every 5 minutes. This is the only step that runs without a request.
+1. The refresher signs a host token with the host key and writes it to the VM's KVP pool as soon as the VM starts or migrates in, and again about every 5 minutes. This is the only step that runs without a request.
 2. The VM client reads the token and sends it to the issuer, naming the audience it wants.
 3. The issuer checks the token against the host allowlist and returns a JWT for that audience.
 4. The VM presents the JWT to a consumer service.
@@ -71,7 +72,7 @@ Three programs are ours to write; Hyper-V stays as it is.
 
 | Component | Runs on | Language | Responsibility |
 | --- | --- | --- | --- |
-| Host refresher (`proof-refresher`) | Each Hyper-V host, as a Windows service | C#/.NET | About every 5 minutes, for each VM on the host: sign a host token with the host key and write it into that VM's KVP External pool |
+| Host refresher (`proof-refresher`) | Each Hyper-V host, as a Windows service | C#/.NET | When a VM starts or migrates in, and about every 5 minutes for each running VM: sign a host token with the host key and write it into that VM's KVP External pool |
 | Issuer (`proof-issuer`) | Kubernetes on Linux, as a Deployment with two replicas | C#/.NET, ASP.NET Core | Verify host tokens against the allowlist; mint audience-specific JWTs at `/token` (RFC 8693); serve the discovery document and JWKS |
 | VM client (`proof`) | Every VM image, Linux and Windows | C#/.NET, self-contained single file | Read the host token from KVP; call the issuer; print or write the result |
 
@@ -95,7 +96,7 @@ Microsoft.IdentityModel and the .NET platform do all cryptographic work; our cod
 
 | Purpose | Algorithm | Why |
 | --- | --- | --- |
-| Host token signature | ES256 (ECDSA, P-256, SHA-256) | A 64-byte signature keeps the token small enough for one KVP value. P-256 is the curve the Windows TPM provider handles (verify on your hardware) |
+| Host token signature | ES256 (ECDSA, P-256, SHA-256) | A 64-byte signature keeps the token small enough for one KVP value. P-256 is built into the CNG software key storage provider on every Windows host |
 | Issued JWT signature | ES256 by default; RS256 only if a federation target rejects ES256 | GCP accepts RS256 or ES256. Entra and AWS acceptance is not confirmed (section 14) |
 | Never accepted | `none`, HS256/384/512, any JWE | Not needed, and each widens the attack surface |
 
@@ -103,7 +104,7 @@ Microsoft.IdentityModel and the .NET platform do all cryptographic work; our cod
 
 - `Microsoft.IdentityModel.JsonWebTokens`: `JsonWebTokenHandler` creates and validates tokens. Use it, not the older `JwtSecurityTokenHandler`.
 - `Microsoft.IdentityModel.Tokens`: `ECDsaSecurityKey`, `JsonWebKeySet`, and `TokenValidationParameters` with `ValidAlgorithms`, `ValidIssuer`, `ValidAudience`, `ValidateLifetime`, `ClockSkew` and `IssuerSigningKeys`.
-- `System.Security.Cryptography.ECDsa` for keys. On Windows hosts, CNG holds the host key: the Microsoft Platform Crypto Provider keeps it in the TPM, and the software provider is the fallback.
+- `System.Security.Cryptography.ECDsa` for keys. On Windows hosts, CNG holds the host key as a non-exportable machine key in the Microsoft Software Key Storage Provider.
 - ASP.NET Core minimal APIs for the issuer's HTTP endpoints.
 
 **Why C# for the issuer**
@@ -153,14 +154,18 @@ Example payload (illustrative values):
 }
 ```
 
-I estimate 500 to 550 characters in compact form with ES256. Measure it in phase 0.
+Measured: 527 characters in compact form with ES256, for a real VM on a Windows Server 2025 host with `cluster` and a 14-character `vm_name` (verified).
 
 ### 6.2 KVP layout
 
 - The host writes into the External pool. In the guest that is `HKLM\SOFTWARE\Microsoft\Virtual Machine\External` on Windows and `/var/lib/hyperv/.kvp_pool_0` on Linux, where `hv_kvp_daemon` must be running.
 - One key, `proof.v1.token`, holds the compact JWS.
-- Limits: key up to 512 bytes, value up to 2048 bytes including the terminator, and the host side expects UTF-16. Budget about 1000 characters per value. If a token ever exceeds that, split it across `proof.v1.token.0` to `.n` and write a `proof.v1.head` key last, so a reader never sees a half-written token.
-- Host API: `Msvm_VirtualSystemManagementService` methods `AddKvpItems`, `ModifyKvpItems` and `RemoveKvpItems`. Use Add for a new key and Modify for an existing one. What Add does with an existing key is unverified, so implement upsert as Modify, then Add if the key is missing.
+- Limits: key up to 512 bytes, value up to 2048 bytes including the terminator, and the host side expects UTF-16. The host accepts a value of 1023 characters and refuses 1024 (verified on Windows Server 2025). A token never needs chunking: if one would exceed 1023 characters, the refresher leaves out `vm_name`, which is informational, and the refresher refuses at startup any settings whose fixed claims alone would not fit. A 100-character ASCII VM name (the Hyper-V maximum) still fits.
+- Host API: `Msvm_VirtualSystemManagementService` methods `AddKvpItems`, `ModifyKvpItems` and `RemoveKvpItems`. Use Add for a new key and Modify for an existing one. Modify on a missing key fails with 32779 (not found) and Add on an existing key fails with 32773 (invalid parameter), so upsert is Modify, then Add on 32779 (verified). Both succeed for a VM that is off, running with no guest OS, or running with Data Exchange disabled, so a successful write does not prove the guest can read it (verified).
+- Write timing: the refresher subscribes to WMI intrinsic events on `Msvm_ComputerSystem` for VMs entering Running (`EnabledState` 2), and runs a pass on each one. The Hyper-V provider raises these itself, without a `WITHIN` polling clause. It also raises many modification events that change nothing, so the refresher ignores modifications of a VM that was already running. A scheduled pass every 5 minutes renews tokens (any within 30 seconds of 5 minutes old) and covers missed events, and a failed write or a lost subscription brings the next pass forward to 30 seconds. Measured on Windows Server 2025 (verified):
+  - A started VM had its token about 200 ms after `Start-VM` returned.
+  - A live migration arrives on the destination as a creation in state 10 (starting) and then a change to 2 (running). Host KVP items travel with the VM, so it arrives carrying the source host's token, valid until it expires. The destination writes its own at once, which matters when a host is drained so its key can be removed.
+  - For about 200 ms after reaching Running, a migrated VM refuses KVP writes with 32775 (invalid state), so the refresher retries that error for up to 15 seconds. The destination's token was in place about 260 ms after `Move-ClusterVirtualMachineRole` returned.
 - Linux pool files hold fixed-size records: a 512-byte key followed by a 2048-byte value.
 - The guest also sees host-pushed parameters (`VirtualMachineId`, `VirtualMachineName`, `PhysicalHostName`) in the `Guest\Parameters` pool. The client may log them as a sanity check. They are not trusted.
 
@@ -271,9 +276,9 @@ Trust starts with one file: the allowlist of host public keys on the issuer. Eve
 ### 7.1 Host keys
 
 - One ES256 (P-256) key per Hyper-V host, generated on that host. Only the public key leaves the host.
-- Non-exportable. Use the Microsoft Platform Crypto Provider where the host has a TPM 2.0, and the software key storage provider otherwise. Microsoft's documentation says the platform provider keeps keys in the TPM where they cannot be extracted. Confirm in phase 0 that .NET's `CngKey` can create an ECDSA P-256 key with it.
+- A non-exportable CNG machine key in the Microsoft Software Key Storage Provider, which every Windows host has. No TPM is used. CNG refuses to export the private key, and the key file is protected by its ACL: SYSTEM and Administrators, plus read (which is what signing needs) for the refresher's service account. Any local administrator can use the key, so host administrators are inside the trust boundary.
 - `kid` is the RFC 7638 JWK thumbprint of the public key. The issuer recomputes it when it loads the allowlist, which catches pasted-key mistakes.
-- A replaced host gets a new key and an allowlist edit. Do not plan to migrate TPM-backed keys.
+- A replaced host gets a new key and an allowlist edit. Do not plan to migrate host keys.
 
 ### 7.2 Allowlist
 
@@ -318,7 +323,7 @@ A stateless issuer and a small refresher on each host keep operations simple. Th
 **Deployment**
 
 - Issuer: a stateless ASP.NET Core service in a Kubernetes Deployment with two replicas spread across nodes, a Service, and TLS at your existing ingress. Readiness and liveness probes; a pod reports ready only after the allowlist has loaded. Configuration (issuer URL, token lifetimes, optional audience allowlist) and the allowlist arrive as ConfigMaps through your GitOps repository, and the signing key arrives as a Secret.
-- Refresher: a Windows service on each Hyper-V host under a dedicated service account. It needs enough Hyper-V rights to call the WMI KVP methods. Confirm the minimum (Hyper-V Administrators group versus Local System).
+- Refresher: a Windows service on each Hyper-V host (`proof-refresher`). It needs enough Hyper-V rights to call the WMI KVP methods and read access to the host key. Local System has both (tested here only as an elevated administrator). For least privilege, run it as its virtual account `NT SERVICE\proof-refresher`, grant it the key with `key create --grant`, and confirm the minimum Hyper-V rights (Hyper-V Administrators group membership is the expected answer).
 - A TLS certificate for the issuer name at your ingress. VM images must trust its CA.
 
 **Logging.** Structured logs for every exchange: time, outcome, host token `jti`, `sub`, host `kid`, audience and source address. Never log tokens, keys or full claim sets.
@@ -367,10 +372,10 @@ Fourteen traps to design around. "Verified" means I confirmed it in documentatio
 
 | # | Gotcha | What to do | Status |
 | --- | --- | --- | --- |
-| 1 | A KVP value holds at most 2048 bytes including the terminator, a key at most 512, and the host side expects UTF-16 | Budget about 1000 characters per value; chunk only if a token exceeds that | Verified (kernel header); the 1000-character budget is my inference |
+| 1 | A KVP value holds at most 2048 bytes including the terminator, a key at most 512, and the host side expects UTF-16 | 1023 characters per value; drop `vm_name` if a token would exceed it | Verified (kernel header, and measured on the host) |
 | 2 | Linux guests need `hv_kvp_daemon` running | Install and enable it in the image | Verified |
-| 3 | KVP entries persist until deleted and move with the VM during live migration | Overwrite on every refresh; allowlist every host in a cluster | Verified |
-| 4 | Updating an existing key needs `ModifyKvpItems`; what `AddKvpItems` does with an existing key is unknown | Implement upsert as Modify, then Add | Verify |
+| 3 | KVP entries persist until deleted and move with the VM during live migration | Overwrite on arrival and on every refresh; allowlist every host in a cluster | Verified (documentation, and a cluster live migration on Windows Server 2025) |
+| 4 | `AddKvpItems` refuses an existing key (32773) and `ModifyKvpItems` refuses a missing one (32779) | Upsert as Modify, then Add on 32779 | Verified (Windows Server 2025) |
 | 5 | `VirtualMachineName` in the guest parameters changes immediately when a VM is renamed | Treat the name as mutable; identity is the VM ID | Verified |
 | 6 | A copied VM may keep the same VM ID, which gives two live VMs one identity | Always generate a new ID on copy or import | Verify |
 | 7 | Any process that can read the External pool can read the token | Check Linux pool file permissions and the Windows `External` key ACL; rely on short lifetimes | Verify |
@@ -378,7 +383,7 @@ Fourteen traps to design around. "Verified" means I confirmed it in documentatio
 | 9 | Entra must reach the discovery document and JWKS over public HTTPS, and federation guides want `kid` and `use: sig` on keys | Host the two documents as static files; always set both fields | Verified (vendor guides) |
 | 10 | Any VM can request any audience | Consumers check `iss` and `sub`, never the audience alone | Design note |
 | 11 | An RFC 8693 response for a JWT carries `token_type` of `N_A` | Clients read `access_token` and ignore `token_type` | Verified (vendor examples) |
-| 12 | TPM-backed keys cannot be exported | Plan a new key and an allowlist edit when a host is rebuilt | Verified (Microsoft documentation) |
+| 12 | Host keys cannot be exported | Plan a new key and an allowlist edit when a host is rebuilt | Verified (CNG export policy, tested) |
 | 13 | EdDSA is not built into Microsoft.IdentityModel | Use ES256 | Verify |
 | 14 | JOSE libraries have had security advisories (jwx fixed a verification bypass in 1.2.11 and a padding-oracle issue in 2.0.11) | Pin versions, update promptly, watch advisories | Verified (jwx changelog) |
 
@@ -447,8 +452,8 @@ Negative tests matter more than positive ones here: a validator that accepts a b
 
 **KVP tests (phase 0)**
 
-- Values near the 2048-byte limit, and chunked tokens if needed.
-- Update behavior: add, modify, and add on an existing key.
+- Values near the limit: 1023 characters accepted, 1024 refused (done on the host; still check what the Linux and Windows guests read back).
+- Update behavior: add, modify, and add on an existing key (done on the host).
 - Pool file parsing on Linux, registry reads on Windows, and who can read them.
 - Duplicate VM ID behavior after copy and import.
 
@@ -476,11 +481,11 @@ Twelve items remain open. Some need your decision; the rest are checks to run be
 | 1 | Confirm C#/.NET for the issuer and VM client (decision 9) | You |
 | 2 | Issuer replicas: with a Kubernetes Deployment, all replicas mount one shared signing Secret, which is the simple path. Confirm it, and decide how key rotation is staged through GitOps | You, before phase 1 |
 | 3 | Whether Entra and AWS accept ES256 from an external issuer; RS256 is the fallback for issued tokens | Phase 2 test |
-| 4 | KVP behavior: Add versus Modify on an existing key, read permissions on the External pool (Linux file mode, Windows ACL), and practical value size | Phase 0 test |
+| 4 | KVP behavior: host side settled (Add versus Modify, 1023-character values; see 6.2). Still open: read permissions on the External pool (Linux file mode, Windows ACL) and what each guest reads back | Phase 0 test |
 | 5 | Duplicate VM IDs after copy or import; policy is to always generate a new ID | Phase 0 test |
 | 6 | Minimum Hyper-V rights for the refresher's service account | Phase 0 test |
-| 7 | Whether every host has a TPM 2.0, and whether the software key store is an acceptable fallback | You, plus a `CngKey` test |
-| 8 | .NET specifics: creating a TPM-backed P-256 key with `CngKey`, `JsonWebTokenHandler` settings for `ValidAlgorithms` and lifetime caps, self-contained single-file size, optional NativeAOT | Phase 0 test |
+| 7 | Settled: host keys use the CNG software key storage provider, no TPM (decision 13). `CngKey` creates a non-exportable P-256 machine key there (tested) | Done |
+| 8 | .NET specifics: `JsonWebTokenHandler` settings for `ValidAlgorithms` and lifetime caps, and self-contained single-file size (the refresher is 73.5 MB). NativeAOT is out for the refresher, because `System.Management` needs built-in COM | Phase 0 test |
 | 9 | The `hv_kvp_daemon` package name for each distribution in your images | Image build |
 | 10 | Audience policy: free-form, or an allowlist of audiences | You, before phase 1 |
 | 11 | Token lifetimes: host token 20 minutes refreshed every 5, issued token 5 minutes (10 at most) | You |
