@@ -10,13 +10,11 @@ namespace Proof.Issuer;
 /// </summary>
 public static class TokenEndpoint
 {
-    public const string Path = "/token";
+    public const string Path = TokenExchange.EndpointPath;
     public const string RateLimitPolicy = "token";
 
     /// <summary>Bodies larger than this are refused. A host token is at most 4 KB.</summary>
     public const int MaxRequestBytes = 16 * 1024;
-
-    public const int MaxAudienceLength = 256;
 
     internal static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
@@ -24,11 +22,6 @@ public static class TokenEndpoint
     private const string InvalidRequest = "invalid_request";
     private const string InvalidTarget = "invalid_target";
     private const string UnsupportedGrantType = "unsupported_grant_type";
-
-    public static bool IsWellFormedAudience(string? audience) =>
-        !string.IsNullOrEmpty(audience)
-        && audience.Length <= MaxAudienceLength
-        && !audience.Any(c => char.IsWhiteSpace(c) || char.IsControl(c));
 
     public static async Task<IResult> HandleAsync(
         HttpContext http,
@@ -104,7 +97,7 @@ public static class TokenEndpoint
         }
 
         var audience = Field("audience");
-        if (!IsWellFormedAudience(audience))
+        if (!TokenExchange.IsWellFormedAudience(audience))
         {
             return log.Refuse(InvalidRequest, "missing or malformed audience");
         }

@@ -553,7 +553,10 @@
         "contentHash": "5K+9KFg2TdTl7VXv88Qzi/0lqK6JFoNP3lRuImPYGRV7K/QYklDyTrj4+A+KAki1JsQi6qKY+hDyY7d6WRqjrw=="
       },
       "proof": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "Proof.Shared": "[1.0.0, )"
+        }
       },
       "proof-issuer": {
         "type": "Project",

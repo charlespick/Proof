@@ -6,6 +6,14 @@
     <AssemblyName>proof</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Images carry one self-contained file and may lack ICU, so the client needs no culture data. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Turns on the trim and AOT analyzers, so a trimmed single file or a NativeAOT build behaves like this one. -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Proof.Shared\Proof.Shared.csproj" />
+  </ItemGroup>
 
 </Project>

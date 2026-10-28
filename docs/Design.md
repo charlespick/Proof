@@ -378,7 +378,7 @@ Fourteen traps to design around. "Verified" means I confirmed it in documentatio
 | 4 | `AddKvpItems` refuses an existing key (32773) and `ModifyKvpItems` refuses a missing one (32779) | Upsert as Modify, then Add on 32779 | Verified (Windows Server 2025) |
 | 5 | `VirtualMachineName` in the guest parameters changes immediately when a VM is renamed | Treat the name as mutable; identity is the VM ID | Verified |
 | 6 | A copied VM may keep the same VM ID, which gives two live VMs one identity | Always generate a new ID on copy or import | Verify |
-| 7 | Any process that can read the External pool can read the token | Check Linux pool file permissions and the Windows `External` key ACL; rely on short lifetimes | Verify |
+| 7 | Any process that can read the External pool can read the token. On Windows the `External` key grants read to Authenticated Users (verified on a Windows Server 2025 guest). On Linux, upstream `hv_kvp_daemon` creates pool files mode 0644 in a 0755 `/var/lib/hyperv`, readable by every account unless its service runs with a narrower umask (from the daemon source; check `ls -l` on a real guest of each distribution) | Treat the host token as readable by any account in the VM; rely on short lifetimes | Partly verified |
 | 8 | Entra and AWS may not accept ES256 from an external issuer | Test each target; fall back to RS256 for issued tokens | Verify (GCP accepts RS256 or ES256: verified) |
 | 9 | Entra must reach the discovery document and JWKS over public HTTPS, and federation guides want `kid` and `use: sig` on keys | Host the two documents as static files; always set both fields | Verified (vendor guides) |
 | 10 | Any VM can request any audience | Consumers check `iss` and `sub`, never the audience alone | Design note |
@@ -481,7 +481,7 @@ Twelve items remain open. Some need your decision; the rest are checks to run be
 | 1 | Confirm C#/.NET for the issuer and VM client (decision 9) | You |
 | 2 | Issuer replicas: with a Kubernetes Deployment, all replicas mount one shared signing Secret, which is the simple path. Confirm it, and decide how key rotation is staged through GitOps | You, before phase 1 |
 | 3 | Whether Entra and AWS accept ES256 from an external issuer; RS256 is the fallback for issued tokens | Phase 2 test |
-| 4 | KVP behavior: host side settled (Add versus Modify, 1023-character values; see 6.2). Still open: read permissions on the External pool (Linux file mode, Windows ACL) and what each guest reads back | Phase 0 test |
+| 4 | KVP behavior: host side settled (Add versus Modify, 1023-character values; see 6.2). Read permissions are verified on Windows and taken from the daemon source on Linux (gotcha 7). Still open: what each guest reads back for a real token, and the pool file mode on a real Linux guest | Phase 0 test |
 | 5 | Duplicate VM IDs after copy or import; policy is to always generate a new ID | Phase 0 test |
 | 6 | Minimum Hyper-V rights for the refresher's service account | Phase 0 test |
 | 7 | Settled: host keys use the CNG software key storage provider, no TPM (decision 13). `CngKey` creates a non-exportable P-256 machine key there (tested) | Done |

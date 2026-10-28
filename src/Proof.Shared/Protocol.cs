@@ -94,4 +94,15 @@ public static class TokenExchange
 
     /// <summary>RFC 8693 section 2.2.1: the issued token is not an OAuth access token.</summary>
     public const string NotApplicableTokenType = "N_A";
+
+    /// <summary>The path of the token endpoint under the issuer URL.</summary>
+    public const string EndpointPath = "/token";
+
+    public const int MaxAudienceLength = 256;
+
+    /// <summary>An audience the issuer will consider: 1 to 256 characters, no whitespace or control characters.</summary>
+    public static bool IsWellFormedAudience([NotNullWhen(true)] string? audience) =>
+        !string.IsNullOrEmpty(audience)
+        && audience.Length <= MaxAudienceLength
+        && !audience.Any(c => char.IsWhiteSpace(c) || char.IsControl(c));
 }

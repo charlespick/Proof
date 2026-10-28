@@ -11,7 +11,7 @@ Proof does authentication only. Consumers decide what an identity may do. See [D
 | `Proof.Refresher` | `src/Proof.Refresher` | Windows service on each Hyper-V host. Signs a host token for each VM and writes it into that VM's KVP pool about every 5 minutes. |
 | `Proof.Issuer` | `src/Proof.Issuer` | ASP.NET Core service on Kubernetes. Verifies host tokens against the host-key allowlist, mints audience-specific JWTs at `/token` (RFC 8693), and serves the OIDC discovery document and JWKS. |
 | `Proof.Client` | `src/Proof.Client` | The `proof` command on every VM image. Reads the host token from KVP, calls the issuer, and prints or writes the issued JWT. |
-| `Proof.Shared` | `src/Proof.Shared` | Class library shared by the refresher and issuer: claim names, token types, validation settings and KVP limits. |
+| `Proof.Shared` | `src/Proof.Shared` | Class library shared by all three programs: claim names, token types, validation settings and KVP limits. |
 
 ## Repository layout
 
@@ -108,9 +108,70 @@ Metrics are on the `Proof.Refresher` meter:
 
 A VM whose writes keep failing is logged as a warning, and as an error once its token has expired. Logs never contain tokens.
 
+## Running the client
+
+`proof` runs inside each VM. It reads the host token from KVP, sends it to the issuer's `/token`, and prints the issued JWT or writes it to a file:
+
+```sh
+proof token --audience my-service                  # print a JWT for my-service
+proof token --audience sts.example --out /run/proof/token   # write it for an SDK that reads a token file
+proof status                                       # show the host token (never printed) and anything wrong
+```
+
+| Option | Meaning |
+| ------ | ------- |
+| `--audience <aud>` | Required for `token`. One audience, up to 256 characters, no spaces |
+| `--out <path>` | Write the JWT to `<path>` (no trailing newline) in one rename, so readers never see a partial file. A new file is mode 0600; a replaced file keeps its mode. The owner is whoever runs `proof` |
+| `--wait <seconds>` | Wait up to that long for an unexpired host token first, for use early in boot |
+| `--config <path>` | Read settings from `<path>` instead of the default |
+
+Exit codes: 0 success, 1 failure, 2 usage, 3 no host token yet. The refresher may not have written one yet, so callers should treat 3 as "retry shortly". When the issuer refuses an exchange, `proof` reads the host token's claims without verifying them and says what it can see: an expired token, a clock behind the host's, or an issuer URL mismatch. The issuer's log has the actual reason.
+
+Settings are in `/etc/proof/config.json` on Linux and `%ProgramData%\Proof\config.json` on Windows. Unknown names are refused:
+
+| Setting | Default | Meaning |
+| ------- | ------- | ------- |
+| `IssuerUrl` | required | Exactly the issuer's `IssuerUrl`. Baked into the image, never learned from KVP |
+| `TokenEndpoint` | `IssuerUrl` + `/token` | Set it when `/token` is served at an internal name while the discovery documents are hosted publicly (Design.md 6.5) |
+| `CaBundlePath` | system store | PEM CA certificates. When set, the issuer's certificate must chain to one of them, and the system store is not used. Relative to the settings file |
+
+Where the client reads KVP:
+
+- **Linux**: `/var/lib/hyperv/.kvp_pool_0`, the External pool file `hv_kvp_daemon` keeps (512-byte key and 2048-byte value records). Reads take an fcntl read lock, so they never see the daemon halfway through a rewrite. Upstream, the daemon creates the file mode 0644, so any account can run `proof`, unless the distribution's service sets a narrower umask (not yet checked on a real guest). Guest parameters come from `.kvp_pool_3`. `proof status` reports a missing daemon (`hv_kvp_daemon` or `hypervkvpd`).
+- **Windows**: `HKLM\SOFTWARE\Microsoft\Virtual Machine\External`, and guest parameters from `...\Guest\Parameters`. This needs the Data Exchange integration service enabled for the VM. The key grants read to Authenticated Users, so any account can run `proof`, and so any account can read the host token (Design.md gotcha 7).
+
+`VirtualMachineId`, `VirtualMachineName` and `PhysicalHostName` from the guest parameters appear in `status` and in messages. They are not trusted. `status` warns if `VirtualMachineId` differs from the token's `sub`, which a copied VM can show until its host writes its own token.
+
+To keep a token file fresh, run `proof token --out` on a timer well inside the issued lifetime (5 minutes by default). For example, with systemd:
+
+```ini
+# /etc/systemd/system/proof-token.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proof token --audience sts.example --out /run/proof/token --wait 60
+
+# /etc/systemd/system/proof-token.timer
+[Timer]
+OnBootSec=0
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target
+```
+
+On Windows, a scheduled task that repeats every 2 minutes does the same job.
+
+Publish as a self-contained, trimmed single file (about 15 MB on win-x64 and 17 MB on linux-x64). Globalization is invariant, so Linux images need no ICU. TLS still needs OpenSSL (`libssl`), as for any .NET app:
+
+```sh
+dotnet publish src/Proof.Client -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true
+dotnet publish src/Proof.Client -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true
+```
+
+The project has the AOT analyzers on, and `-p:PublishAot=true` compiles without warnings. Linking a NativeAOT build needs the platform toolchain on a machine of the target OS, and that build has not been tried.
+
 ## Status
 
 - `Proof.Shared`: claim names, token types, host-token policy and key helpers (JWK and RFC 7638 `kid`).
 - `Proof.Issuer`: implemented. Token exchange, allowlist loading and reload, discovery, JWKS, health, rate limits and metrics (`Proof.Issuer` meter), with the section 12 negative tests.
 - `Proof.Refresher`: implemented. Host key management, host token signing, KVP writes over WMI, the refresh loop, metrics, and the `key` and `once` commands. Tested end to end on a Windows Server 2025 Hyper-V host against the issuer.
-- `Proof.Client`: template stub.
+- `Proof.Client`: implemented. KVP reads on Linux (pool files) and Windows (registry), token exchange, token files, `token` and `status`. Linux pool reading was tested against synthetic pool files with a competing fcntl lock, not yet against a real `hv_kvp_daemon`. The Windows registry path was checked on a Hyper-V guest whose host has no refresher. No exchange has run end to end on a real VM yet.

@@ -74,7 +74,7 @@ public sealed class IssuerOptionsValidator : IValidateOptions<IssuerOptions>
             errors.Add($"Proof:IssuedTokenLifetime must be positive and at most {IssuerOptions.MaxIssuedTokenLifetime}.");
         }
 
-        if (options.AllowedAudiences.Any(a => !TokenEndpoint.IsWellFormedAudience(a)))
+        if (options.AllowedAudiences.Any(a => !TokenExchange.IsWellFormedAudience(a)))
         {
             errors.Add("Proof:AllowedAudiences contains an empty or malformed audience.");
         }
