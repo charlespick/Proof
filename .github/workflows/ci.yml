@@ -239,7 +239,12 @@ jobs:
           pattern: '{windows,linux}'
           path: dist
           merge-multiple: true
-      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # GitHub turns ~ in an asset name into ., so rename first and SHA256SUMS names what the release holds.
+      - run: |
+          cd dist
+          for f in *~*; do if [ -e "$f" ]; then mv "$f" "${f//\~/.}"; fi; done
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
