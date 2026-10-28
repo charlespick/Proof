@@ -204,6 +204,11 @@ jobs:
           tags: |
             type=raw,value=${{ needs.version.outputs.version }}
             type=raw,value=latest,enable=${{ needs.version.outputs.prerelease == 'false' }}
+          # The action labels images from the repository, which would replace the Dockerfile's title and
+          # description; keep the Dockerfile's.
+          labels: |
+            org.opencontainers.image.title=proof-issuer
+            org.opencontainers.image.description=Proof issuer: trades Hyper-V host tokens for audience-specific JWTs
       - if: needs.version.outputs.release == 'true'
         uses: docker/build-push-action@v6
         with:
@@ -227,8 +232,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only the packages: the image builds upload build records as artifacts too, which are not release assets
+      # and which this action fails to download.
       - uses: actions/download-artifact@v4
         with:
+          pattern: '{windows,linux}'
           path: dist
           merge-multiple: true
       - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
