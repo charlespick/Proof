@@ -37,7 +37,7 @@ tests/
 
 ## Building and testing
 
-Requires the .NET SDK (10.0 or later). Tests use [xUnit v3](https://xunit.net/). NuGet versions are pinned in each project's `packages.lock.json`, which also cover the `win-x64`, `linux-x64` and `linux-arm64` publishes. CI restores in locked mode, so a change to a package reference needs `dotnet restore Proof.slnx --force-evaluate` and the updated lock files committed.
+Requires .NET SDK 10.0.302 exactly, as `global.json` pins, because the lock files record the packages that SDK bundles (such as ILLink). To move to a newer SDK, change `global.json` and the SDK image in the Dockerfile together, then regenerate the lock files. Tests use [xUnit v3](https://xunit.net/). NuGet versions are pinned in each project's `packages.lock.json`, which also cover the `win-x64`, `linux-x64` and `linux-arm64` publishes. CI restores in locked mode, so a change to a package reference needs `dotnet restore Proof.slnx --force-evaluate` and the updated lock files committed.
 
 ```sh
 dotnet build Proof.slnx

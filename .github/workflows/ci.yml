@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
       - id: v
         run: |
           set -euo pipefail
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
       # CI=true turns on RestoreLockedMode (Directory.Build.props), so a stale lock file fails here.
       - run: dotnet test --solution Proof.slnx -c Release
 
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
       - run: dotnet build installer/Proof.Refresher.Installer/Proof.Refresher.Installer.wixproj -c Release
       - run: dotnet build installer/Proof.Client.Installer/Proof.Client.Installer.wixproj -c Release
       - shell: bash
@@ -128,7 +128,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
       - run: dotnet publish src/Proof.Client -c Release -r linux-x64 -p:DebugType=none -o publish/linux-x64
       - run: packaging/debian/build-deb.sh publish/linux-x64 "${{ needs.version.outputs.deb-version }}" amd64 dist
       - name: Install and remove the package

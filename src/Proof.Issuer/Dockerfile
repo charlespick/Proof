@@ -8,7 +8,8 @@
 # Proof__* environment variables; the allowlist and signing key are mounted at the paths set below. See README.md.
 
 # The SDK stage runs on the build machine and cross-compiles, so a multi-platform build needs no emulation.
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# The SDK global.json pins: its bundled packages (ILLink) are in the lock files.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0.302 AS build
 ARG TARGETARCH
 # The context has no .git, so the version comes in as arguments (build/Version.targets).
 ARG VERSION=0.0.0-0.dev.0
