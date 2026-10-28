@@ -74,6 +74,32 @@ public static class HostKeyStore
         return new ECDsaCng(key);
     }
 
+    /// <summary>
+    /// Lets <paramref name="account"/> sign with an existing key by adding read to its DACL. Returns false, changing
+    /// nothing, if the DACL already has an allow entry for the account.
+    /// </summary>
+    public static bool GrantRead(string name, SecurityIdentifier account)
+    {
+        using var key = CngKey.Open(name, Provider, CngKeyOpenOptions.MachineKey | CngKeyOpenOptions.Silent);
+        var bytes = key.GetProperty(SecurityDescriptorProperty, DaclSecurityInformation).GetValue() ?? [];
+        var descriptor = new CommonSecurityDescriptor(isContainer: false, isDS: false, bytes, 0);
+        var dacl = descriptor.DiscretionaryAcl ?? throw new InvalidOperationException($"Host key '{name}' has no access list to add to.");
+        // CNG stores generic rights mapped to its own, so any allow entry counts as already granted.
+        foreach (var ace in dacl)
+        {
+            if (ace is CommonAce { AceQualifier: AceQualifier.AccessAllowed } common && common.SecurityIdentifier == account)
+            {
+                return false;
+            }
+        }
+
+        dacl.AddAccess(AccessControlType.Allow, account, GenericRead, InheritanceFlags.None, PropagationFlags.None);
+        var updated = new byte[descriptor.BinaryLength];
+        descriptor.GetBinaryForm(updated, 0);
+        key.SetProperty(new CngProperty(SecurityDescriptorProperty, updated, DaclSecurityInformation));
+        return true;
+    }
+
     /// <summary>A protected DACL: full control for SYSTEM and Administrators, read for each granted account.</summary>
     private static byte[] BuildSecurityDescriptor(IEnumerable<NTAccount> grantRead)
     {

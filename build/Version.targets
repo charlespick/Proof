@@ -1,0 +1,144 @@
+<Project>
+
+  <!--
+    Every version string comes from the nearest v-prefixed tag, read with git describe. No clock is involved, so
+    each project computes the same answer on its own and nothing has to be handed down between nested builds.
+
+      HEAD                          ProofVersion          ProofMsiVersion  FileVersion   ProofDebVersion
+      at v1.2.3                     1.2.3                 1.2.3            1.2.3.0       1.2.3
+      at v1.3.0-rc.1                1.3.0-rc.1            1.3.0            1.3.0.0       1.3.0~rc.1
+      4 commits after v1.2.3        1.2.4-0.dev.4         1.2.4            1.2.4.4       1.2.4~0.dev.4
+      4 commits after v1.3.0-rc.1   1.3.0-rc.1.dev.4      1.3.0            1.3.0.4       1.3.0~rc.1.dev.4
+      no tag yet, 9 commits         0.0.1-0.dev.9         0.0.1            0.0.1.9       0.0.1~0.dev.9
+
+    An untagged build is a prerelease of the next patch. Its label starts with the number 0, which SemVer and dpkg
+    both sort below any alpha, beta or rc label, so it never outranks the tag that follows it. After a prerelease
+    tag the commit count extends that tag's label instead, which sorts above it and below the next one.
+
+    Windows Installer compares only the first three fields of ProductVersion, so every build of one
+    major.minor.patch carries the same MSI version: the installers allow same-version upgrades, so any of those
+    builds replaces any other, and refuse a lower version. The fourth FileVersion field (commits since the tag)
+    tells builds of one version apart in Explorer and in support.
+
+    Tags are vMAJOR.MINOR.PATCH with an optional prerelease of dot-separated letters and digits, such as
+    v1.3.0-rc.1. Write rc.1, not rc1: SemVer compares rc10 and rc9 as strings.
+
+    Set ProofVersion (a property or an environment variable) to skip git describe. CI does on tag builds, because
+    a release tag can share its commit with a prerelease tag and git describe may pick either; the container
+    build does because its context has no .git. ProofCommit can be set the same way.
+    build/Version.proj prints these values for CI.
+  -->
+
+  <PropertyGroup>
+    <!-- The commit is already in InformationalVersion, written below. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <ProofRepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..'))</ProofRepoRoot>
+    <ProofCommitsSinceTag Condition="'$(ProofCommitsSinceTag)' == ''">0</ProofCommitsSinceTag>
+  </PropertyGroup>
+
+  <Target Name="ProofDescribe" Condition="'$(ProofVersion)' == ''">
+    <!-- The pattern is quoted so a POSIX shell does not glob it. -->
+    <Exec Command="git describe --tags --long --dirty --abbrev=7 --match &quot;v[0-9]*&quot;"
+          WorkingDirectory="$(ProofRepoRoot)"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low"
+          EchoOff="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ProofDescribe" />
+      <Output TaskParameter="ExitCode" PropertyName="_ProofDescribeExit" />
+    </Exec>
+
+    <PropertyGroup Condition="'$(_ProofDescribeExit)' == '0'">
+      <_ProofDescribeMatch>$([System.Text.RegularExpressions.Regex]::Match('$(_ProofDescribe)', '^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?-(\d+)-g([0-9a-f]+)(-dirty)?$'))</_ProofDescribeMatch>
+    </PropertyGroup>
+    <Error Condition="'$(_ProofDescribeExit)' == '0' and '$(_ProofDescribeMatch)' == ''"
+           Text="The nearest tag ($(_ProofDescribe)) is not vMAJOR.MINOR.PATCH with an optional prerelease of dot-separated letters and digits." />
+
+    <PropertyGroup Condition="'$(_ProofDescribeMatch)' != ''">
+      <_ProofTagMajor>$([System.Text.RegularExpressions.Regex]::Match('$(_ProofDescribe)', '^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?-(\d+)-g([0-9a-f]+)(-dirty)?$').Groups[1].Value)</_ProofTagMajor>
+      <_ProofTagMinor>$([System.Text.RegularExpressions.Regex]::Match('$(_ProofDescribe)', '^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?-(\d+)-g([0-9a-f]+)(-dirty)?$').Groups[2].Value)</_ProofTagMinor>
+      <_ProofTagPatch>$([System.Text.RegularExpressions.Regex]::Match('$(_ProofDescribe)', '^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?-(\d+)-g([0-9a-f]+)(-dirty)?$').Groups[3].Value)</_ProofTagPatch>
+      <_ProofTagPrerelease>$([System.Text.RegularExpressions.Regex]::Match('$(_ProofDescribe)', '^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?-(\d+)-g([0-9a-f]+)(-dirty)?$').Groups[4].Value)</_ProofTagPrerelease>
+      <ProofCommitsSinceTag>$([System.Text.RegularExpressions.Regex]::Match('$(_ProofDescribe)', '^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?-(\d+)-g([0-9a-f]+)(-dirty)?$').Groups[5].Value)</ProofCommitsSinceTag>
+      <ProofCommit>$([System.Text.RegularExpressions.Regex]::Match('$(_ProofDescribe)', '^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?-(\d+)-g([0-9a-f]+)(-dirty)?$').Groups[6].Value)</ProofCommit>
+      <ProofCommit Condition="$(_ProofDescribe.EndsWith('-dirty'))">$(ProofCommit).dirty</ProofCommit>
+    </PropertyGroup>
+
+    <!-- No tag yet: count every commit as if after v0.0.0. -->
+    <Exec Condition="'$(_ProofDescribeExit)' != '0'"
+          Command="git rev-list --count HEAD"
+          WorkingDirectory="$(ProofRepoRoot)"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low"
+          EchoOff="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ProofCommitCount" />
+      <Output TaskParameter="ExitCode" PropertyName="_ProofCommitCountExit" />
+    </Exec>
+    <Error Condition="'$(_ProofDescribeExit)' != '0' and '$(_ProofCommitCountExit)' != '0'"
+           Text="Cannot read the version from git in $(ProofRepoRoot). Build from a clone, or pass -p:ProofVersion=&lt;semver&gt;." />
+    <PropertyGroup Condition="'$(_ProofDescribeExit)' != '0'">
+      <_ProofTagMajor>0</_ProofTagMajor>
+      <_ProofTagMinor>0</_ProofTagMinor>
+      <_ProofTagPatch>0</_ProofTagPatch>
+      <ProofCommitsSinceTag>$(_ProofCommitCount)</ProofCommitsSinceTag>
+    </PropertyGroup>
+
+    <PropertyGroup>
+      <ProofVersion Condition="'$(ProofCommitsSinceTag)' == '0'">$(_ProofTagMajor).$(_ProofTagMinor).$(_ProofTagPatch)$(_ProofTagPrerelease)</ProofVersion>
+      <ProofVersion Condition="'$(ProofCommitsSinceTag)' != '0' and '$(_ProofTagPrerelease)' != ''">$(_ProofTagMajor).$(_ProofTagMinor).$(_ProofTagPatch)$(_ProofTagPrerelease).dev.$(ProofCommitsSinceTag)</ProofVersion>
+      <ProofVersion Condition="'$(ProofCommitsSinceTag)' != '0' and '$(_ProofTagPrerelease)' == ''">$(_ProofTagMajor).$(_ProofTagMinor).$([MSBuild]::Add($(_ProofTagPatch), 1))-0.dev.$(ProofCommitsSinceTag)</ProofVersion>
+    </PropertyGroup>
+  </Target>
+
+  <!-- A version handed in still names its commit when there is a repository to read it from. -->
+  <Target Name="ProofCommit" Condition="'$(ProofCommit)' == ''" DependsOnTargets="ProofDescribe">
+    <Exec Command="git describe --always --dirty --abbrev=7 --exclude &quot;*&quot;"
+          WorkingDirectory="$(ProofRepoRoot)"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low"
+          EchoOff="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ProofHeadCommit" />
+      <Output TaskParameter="ExitCode" PropertyName="_ProofHeadCommitExit" />
+    </Exec>
+    <PropertyGroup Condition="'$(_ProofHeadCommitExit)' == '0'">
+      <ProofCommit>$(_ProofHeadCommit.Replace('-dirty', '.dirty'))</ProofCommit>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="ProofVersion"
+          DependsOnTargets="ProofDescribe;ProofCommit"
+          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;GenerateNuspec;CoreCompile">
+    <PropertyGroup>
+      <_ProofVersionPattern>^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?$</_ProofVersionPattern>
+      <_ProofMajor>$([System.Text.RegularExpressions.Regex]::Match('$(ProofVersion)', '$(_ProofVersionPattern)').Groups[1].Value)</_ProofMajor>
+      <_ProofMinor>$([System.Text.RegularExpressions.Regex]::Match('$(ProofVersion)', '$(_ProofVersionPattern)').Groups[2].Value)</_ProofMinor>
+      <_ProofPatch>$([System.Text.RegularExpressions.Regex]::Match('$(ProofVersion)', '$(_ProofVersionPattern)').Groups[3].Value)</_ProofPatch>
+    </PropertyGroup>
+    <Error Condition="'$(_ProofMajor)' == ''" Text="ProofVersion '$(ProofVersion)' is not MAJOR.MINOR.PATCH with an optional prerelease of dot-separated letters and digits." />
+    <!-- The MSI ProductVersion limits: 255.255.65535. FileVersion fields are 16 bits. -->
+    <Error Condition="$(_ProofMajor) &gt; 255 or $(_ProofMinor) &gt; 255 or $(_ProofPatch) &gt; 65535" Text="ProofVersion '$(ProofVersion)' does not fit an MSI ProductVersion (at most 255.255.65535)." />
+    <Error Condition="$(ProofCommitsSinceTag) &gt; 65535" Text="More than 65535 commits since the last tag do not fit in FileVersion." />
+
+    <PropertyGroup>
+      <ProofMsiVersion>$(_ProofMajor).$(_ProofMinor).$(_ProofPatch)</ProofMsiVersion>
+      <ProofDebVersion>$(ProofVersion.Replace('-', '~'))</ProofDebVersion>
+      <ProofInformationalVersion>$(ProofVersion)</ProofInformationalVersion>
+      <ProofInformationalVersion Condition="'$(ProofCommit)' != ''">$(ProofVersion)+$(ProofCommit)</ProofInformationalVersion>
+
+      <Version>$(ProofVersion)</Version>
+      <PackageVersion>$(ProofVersion)</PackageVersion>
+      <AssemblyVersion>$(ProofMsiVersion).0</AssemblyVersion>
+      <FileVersion>$(ProofMsiVersion).$(ProofCommitsSinceTag)</FileVersion>
+      <InformationalVersion>$(ProofInformationalVersion)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
+
+</Project>

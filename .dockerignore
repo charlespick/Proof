@@ -1,0 +1,12 @@
+# The issuer image needs only the solution files, build/, src/Proof.Shared and src/Proof.Issuer.
+**/bin/
+**/obj/
+.git/
+.github/
+.vs/
+docs/
+installer/
+packaging/
+tests/
+src/Proof.Client/
+src/Proof.Refresher/

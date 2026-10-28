@@ -1,0 +1,18 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <PropertyGroup>
+    <OutputName>proof-refresher</OutputName>
+    <PayloadProject>$(MSBuildThisFileDirectory)..\..\src\Proof.Refresher\Proof.Refresher.csproj</PayloadProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\License.wxs" />
+  </ItemGroup>
+
+  <Import Project="..\Installer.targets" />
+
+</Project>

@@ -3,6 +3,13 @@
   <PropertyGroup>
     <!-- Pin every resolved NuGet version (Design.md section 11, supply chain). -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- CI restores exactly what the lock files say, and fails if they are out of date. -->
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+    <!-- Every runtime a package is built for, so the lock files cover those restores too. -->
+    <RuntimeIdentifiers>win-x64;linux-x64;linux-arm64</RuntimeIdentifiers>
   </PropertyGroup>
+
+  <!-- Version, FileVersion and the installer versions, from the nearest git tag. -->
+  <Import Project="$(MSBuildThisFileDirectory)build\Version.targets" />
 
 </Project>

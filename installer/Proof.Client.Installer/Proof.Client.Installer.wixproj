@@ -1,0 +1,13 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <PropertyGroup>
+    <OutputName>proof</OutputName>
+    <PayloadProject>$(MSBuildThisFileDirectory)..\..\src\Proof.Client\Proof.Client.csproj</PayloadProject>  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\License.wxs" />
+  </ItemGroup>
+
+  <Import Project="..\Installer.targets" />
+
+</Project>

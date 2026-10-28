@@ -323,7 +323,7 @@ A stateless issuer and a small refresher on each host keep operations simple. Th
 **Deployment**
 
 - Issuer: a stateless ASP.NET Core service in a Kubernetes Deployment with two replicas spread across nodes, a Service, and TLS at your existing ingress. Readiness and liveness probes; a pod reports ready only after the allowlist has loaded. Configuration (issuer URL, token lifetimes, optional audience allowlist) and the allowlist arrive as ConfigMaps through your GitOps repository, and the signing key arrives as a Secret.
-- Refresher: a Windows service on each Hyper-V host (`proof-refresher`). It needs enough Hyper-V rights to call the WMI KVP methods and read access to the host key. Local System has both (tested here only as an elevated administrator). For least privilege, run it as its virtual account `NT SERVICE\proof-refresher`, grant it the key with `key create --grant`, and confirm the minimum Hyper-V rights (Hyper-V Administrators group membership is the expected answer).
+- Refresher: a Windows service on each Hyper-V host (`proof-refresher`), running as its virtual account `NT SERVICE\proof-refresher`. The account needs membership of Hyper-V Administrators, to see VMs and call the WMI KVP methods, and read access to the host key. The MSI grants both with `proof-refresher service grant`. Tested on Windows Server 2025: with the membership, the account's KVP writes succeed; without it, Hyper-V shows the account no VMs, so nothing is written and nothing fails visibly.
 - A TLS certificate for the issuer name at your ingress. VM images must trust its CA.
 
 **Logging.** Structured logs for every exchange: time, outcome, host token `jti`, `sub`, host `kid`, audience and source address. Never log tokens, keys or full claim sets.
@@ -354,7 +354,7 @@ Each image carries the VM client and what it needs to read KVP. It carries no se
 ### Linux
 
 - `hv_kvp_daemon` installed and enabled. The package name varies by distribution; check yours.
-- `proof` at `/usr/local/bin/proof`, and `/etc/proof/config.json` holding the issuer URL and CA bundle path. The issuer URL is baked in, not learned from KVP.
+- `proof` at `/usr/bin/proof` (the .deb installs it there), and `/etc/proof/config.json` holding the issuer URL and CA bundle path. The issuer URL is baked in, not learned from KVP.
 
 ### Windows
 
@@ -483,7 +483,7 @@ Twelve items remain open. Some need your decision; the rest are checks to run be
 | 3 | Whether Entra and AWS accept ES256 from an external issuer; RS256 is the fallback for issued tokens | Phase 2 test |
 | 4 | KVP behavior: host side settled (Add versus Modify, 1023-character values; see 6.2). Read permissions are verified on Windows and taken from the daemon source on Linux (gotcha 7). Still open: what each guest reads back for a real token, and the pool file mode on a real Linux guest | Phase 0 test |
 | 5 | Duplicate VM IDs after copy or import; policy is to always generate a new ID | Phase 0 test |
-| 6 | Minimum Hyper-V rights for the refresher's service account | Phase 0 test |
+| 6 | Settled: the refresher's virtual account needs Hyper-V Administrators membership, and that is enough (tested on Windows Server 2025). Without it the account sees no VMs | Done |
 | 7 | Settled: host keys use the CNG software key storage provider, no TPM (decision 13). `CngKey` creates a non-exportable P-256 machine key there (tested) | Done |
 | 8 | .NET specifics: `JsonWebTokenHandler` settings for `ValidAlgorithms` and lifetime caps, and self-contained single-file size (the refresher is 73.5 MB). NativeAOT is out for the refresher, because `System.Management` needs built-in COM | Phase 0 test |
 | 9 | The `hv_kvp_daemon` package name for each distribution in your images | Image build |

@@ -1,0 +1,10 @@
+<Project>
+
+  <!--
+    Prints the versions for CI and packaging scripts, the same ones every project build computes:
+
+      dotnet msbuild build/Version.proj -t:ProofVersion -getProperty:ProofVersion -getProperty:ProofDebVersion
+  -->
+  <Import Project="Version.targets" />
+
+</Project>

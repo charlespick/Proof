@@ -1,0 +1,35 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!--
+    The proof command for Windows VM images: msiexec /i proof.msi /qn. It has no properties and no dialogs.
+    It puts the install folder on the machine PATH, and does not write %ProgramData%\Proof\config.json, which
+    belongs to the image (Design.md 9).
+  -->
+  <Package Name="Proof Client"
+           Manufacturer="Proof"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="EB5C2BF9-CB44-4F51-BED0-56B8FD9DE392"
+           Scope="perMachine">
+
+    <!-- ProductVersion is major.minor.patch, so builds of one version share it; any of them replaces any other.
+         See build/Version.targets. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it first to install this one." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/charlespick/Proof" />
+
+    <Feature Id="Client">
+      <ComponentRef Id="License" />
+
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(var.PayloadDir)proof.exe" KeyPath="yes" />
+        <!-- Removed again on uninstall. New processes see it; running ones keep the PATH they started with. -->
+        <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+    </Feature>
+
+  </Package>
+
+</Wix>

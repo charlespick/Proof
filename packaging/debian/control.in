@@ -1,0 +1,17 @@
+Package: proof
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Charles Pickering <me@charlespick.xyz>
+Installed-Size: @INSTALLED_SIZE@
+Depends: libc6, libgcc-s1 | libgcc1, libstdc++6, libssl3t64 | libssl3 | libssl1.1, ca-certificates
+Recommends: hyperv-daemons | linux-cloud-tools-virtual
+Section: admin
+Priority: optional
+Homepage: https://github.com/charlespick/Proof
+Description: Hyper-V VM identity client
+ proof reads the host token that the Hyper-V host writes into this VM over
+ KVP, trades it with the Proof issuer for an audience-specific JWT, and
+ prints the JWT or writes it to a file.
+ .
+ It reads the KVP pool that hv_kvp_daemon keeps, and its settings from
+ /etc/proof/config.json, which the image provides.

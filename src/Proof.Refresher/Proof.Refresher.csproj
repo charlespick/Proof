@@ -22,4 +22,19 @@
   <ItemGroup>
     <ProjectReference Include="..\Proof.Shared\Proof.Shared.csproj" />
   </ItemGroup>
+
+  <!--
+    How the refresher ships: one self-contained file, so `dotnet publish -r win-x64` is the whole command. Set here
+    rather than on the command line, where the properties would reach Proof.Shared's restore too.
+  -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+  </PropertyGroup>
+
+  <!-- Every build warns about what single-file would break. It also keeps the analyzer package in every restore, so
+       the lock file is the same with and without a runtime identifier. -->
+  <PropertyGroup>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+  </PropertyGroup>
 </Project>

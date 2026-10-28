@@ -12,6 +12,17 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
+  <!--
+    How the client ships: one self-contained, trimmed file per runtime, so `dotnet publish -r <rid>` is the whole
+    command. Set here rather than on the command line, where the properties would reach Proof.Shared's restore too
+    and disagree with its lock file.
+  -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>true</PublishTrimmed>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Proof.Shared\Proof.Shared.csproj" />
   </ItemGroup>

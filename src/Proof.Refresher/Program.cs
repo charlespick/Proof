@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -19,6 +20,9 @@ try
         ["key", "create", .. var rest] => Commands.KeyCreate(rest),
         ["key", "show"] => Commands.KeyShow(),
         ["once", .. var rest] => await Commands.OnceAsync(rest),
+        ["service", "grant"] => Commands.ServiceGrant(),
+        ["service", "revoke"] => Commands.ServiceRevoke(),
+        ["--version"] => Commands.Version(),
         _ => Commands.Usage(),
     };
 }
@@ -41,6 +45,12 @@ internal static class Commands
         proof-refresher key show             Print the host key's allowlist entry and who may use it.
         proof-refresher once [--vm <name or id>]
                                              Write a token to every running VM (or one VM) now, and report.
+        proof-refresher service grant        Run the installed service as its virtual account, NT SERVICE\proof-refresher,
+                                             and give that account what it needs: Hyper-V Administrators, read on
+                                             the host key, and its event log source. The MSI runs it; run it again
+                                             after creating a new host key.
+        proof-refresher service revoke       Take the account out of Hyper-V Administrators.
+        proof-refresher --version            Print the version.
 
         Settings come from appsettings.json next to the executable, then %ProgramData%\Proof\refresher.json,
         then environment variables (Proof__IssuerUrl, Proof__HostId, Proof__Cluster, Proof__HostKeyName,
@@ -51,6 +61,12 @@ internal static class Commands
     {
         Console.Error.WriteLine(Help);
         return 2;
+    }
+
+    public static int Version()
+    {
+        Console.WriteLine(typeof(Commands).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion);
+        return 0;
     }
 
     public static int Run(string[] args)
@@ -121,6 +137,53 @@ internal static class Commands
         }
 
         PrintEntry(options, key);
+        return 0;
+    }
+
+    public static int ServiceGrant()
+    {
+        var account = ServiceAccess.Account.Value;
+        var sid = ServiceAccess.AccountSid();
+        ServiceAccess.RunAsVirtualAccount();
+        Console.Error.WriteLine($"The {ServiceAccess.ServiceName} service runs as {account}.");
+        Console.Error.WriteLine(ServiceAccess.AddToHyperVAdministrators(sid)
+            ? $"Added {account} to Hyper-V Administrators."
+            : $"{account} is already in Hyper-V Administrators.");
+        Console.Error.WriteLine(ServiceAccess.EnsureEventSource()
+            ? $"Registered the event log source '{ServiceAccess.ServiceName}'."
+            : $"The event log source '{ServiceAccess.ServiceName}' is already registered.");
+
+        // The key last, and not an error when it cannot be granted: the service then refuses to start, and says why
+        // in the event log, which the source registered above makes possible.
+        RefresherOptions options;
+        try
+        {
+            options = LoadOptions();
+        }
+        catch (Exception ex) when (ex is OptionsValidationException or InvalidDataException or FormatException)
+        {
+            Console.Error.WriteLine($"Settings could not be read, so no host key was granted: {ex.Message}");
+            return 0;
+        }
+
+        if (!HostKeyStore.Exists(options.HostKeyName))
+        {
+            Console.Error.WriteLine($"Host key '{options.HostKeyName}' does not exist, so it was not granted. Create it, then run: proof-refresher service grant");
+            return 0;
+        }
+
+        Console.Error.WriteLine(HostKeyStore.GrantRead(options.HostKeyName, sid)
+            ? $"Granted {account} read on host key '{options.HostKeyName}'."
+            : $"{account} can already use host key '{options.HostKeyName}'.");
+        return 0;
+    }
+
+    public static int ServiceRevoke()
+    {
+        var account = ServiceAccess.Account.Value;
+        Console.Error.WriteLine(ServiceAccess.RemoveFromHyperVAdministrators(ServiceAccess.AccountSid())
+            ? $"Removed {account} from Hyper-V Administrators."
+            : $"{account} was not in Hyper-V Administrators.");
         return 0;
     }
 

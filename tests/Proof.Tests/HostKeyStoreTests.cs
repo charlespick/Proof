@@ -97,6 +97,30 @@ public sealed class HostKeyStoreTests : IDisposable
         Assert.Contains(access, a => a.Contains("Administrators", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void GrantReadAddsAnAccountToAnExistingKeyOnce()
+    {
+        using (HostKeyStore.Create(name, []))
+        {
+        }
+
+        var networkService = new SecurityIdentifier(WellKnownSidType.NetworkServiceSid, null);
+        Assert.DoesNotContain(HostKeyStore.DescribeAccess(name), a => a.Contains("NETWORK SERVICE", StringComparison.OrdinalIgnoreCase));
+
+        Assert.True(HostKeyStore.GrantRead(name, networkService));
+        Assert.False(HostKeyStore.GrantRead(name, networkService));
+
+        var access = HostKeyStore.DescribeAccess(name);
+        Assert.Single(access, a => a.Contains("NETWORK SERVICE", StringComparison.OrdinalIgnoreCase) && a.EndsWith("read", StringComparison.Ordinal));
+        Assert.Contains(access, a => a.Contains("SYSTEM", StringComparison.OrdinalIgnoreCase) && a.EndsWith("full control", StringComparison.Ordinal));
+        Assert.Contains(access, a => a.Contains("Administrators", StringComparison.OrdinalIgnoreCase) && a.EndsWith("full control", StringComparison.Ordinal));
+
+        // The key still opens for signing after its DACL is rewritten.
+        using var key = HostKeyStore.Open(name);
+        Assert.True(ProofKeys.IsP256(key));
+    }
+
     private static bool IsElevated() =>
         OperatingSystem.IsWindows() && new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 }

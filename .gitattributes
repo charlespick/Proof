@@ -1,0 +1,4 @@
+# Shell scripts and Debian control files are read on Linux; keep them LF whatever the checkout's autocrlf.
+*.sh text eol=lf
+packaging/debian/** text eol=lf
+Dockerfile text eol=lf

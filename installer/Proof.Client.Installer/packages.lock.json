@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "dependencies": {
+    "native,Version=v0.0": {},
+    "native,Version=v0.0/linux-arm64": {},
+    "native,Version=v0.0/linux-x64": {},
+    "native,Version=v0.0/win-x64": {}
+  }
+}

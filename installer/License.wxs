@@ -1,0 +1,18 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!--
+    The install folder and the license, in both MSIs. The component has one fixed GUID in both, so on a machine
+    with both installed Windows Installer counts it twice and removes the file only with the last product.
+    Change nothing about this component without changing its GUID.
+  -->
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Proof" />
+    </StandardDirectory>
+
+    <Component Id="License" Directory="INSTALLFOLDER" Guid="5D468F6A-270E-4C5D-B039-8502739DCDC4">
+      <File Id="License" Source="$(var.LicenseFile)" Name="LICENSE.txt" KeyPath="yes" />
+    </Component>
+  </Fragment>
+
+</Wix>

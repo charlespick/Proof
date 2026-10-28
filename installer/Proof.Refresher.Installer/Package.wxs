@@ -1,0 +1,95 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <!--
+    Meant for configuration management: msiexec /i proof-refresher.msi /qn. It has no properties and no dialogs.
+    Settings and the host key are set up before it runs, and it fails, changing nothing, if they are not:
+
+    - %ProgramData%\Proof\refresher.json must exist (checked first, with a message saying so).
+    - The service must start. The refresher refuses to start when its settings are invalid or the host key is
+      missing or unusable, and says why in the Application event log. Windows Installer then reports error 1920
+      and rolls the install back.
+
+    The service runs as its virtual account, NT SERVICE\proof-refresher, not Local System. Between installing the
+    service and starting it, `proof-refresher service grant` switches the service to that account and gives the
+    account what it needs (Design.md 8): membership of Hyper-V Administrators, read on the host key named in the
+    settings, and the event log source.
+    A repair (msiexec /fa) runs it again, for example after a new host key. Uninstalling takes the account out of
+    Hyper-V Administrators; the settings, the host key and the event source stay.
+  -->
+  <Package Name="Proof Refresher"
+           Manufacturer="Proof"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="841EDA79-B3E1-41AA-8DFA-AB144A4030AE"
+           Scope="perMachine">
+
+    <!-- ProductVersion is major.minor.patch, so builds of one version share it; any of them replaces any other.
+         See build/Version.targets. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it first to install this one." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/charlespick/Proof" />
+
+    <Property Id="REFRESHERSETTINGS">
+      <DirectorySearch Id="ProofSettingsFolder" Path="[CommonAppDataFolder]Proof" Depth="0">
+        <FileSearch Name="refresher.json" />
+      </DirectorySearch>
+    </Property>
+    <Launch Condition="Installed OR REFRESHERSETTINGS"
+            Message="[ProductName] needs its settings in [CommonAppDataFolder]Proof\refresher.json, with at least Proof:IssuerUrl, before it is installed." />
+
+    <!-- Deferred and not impersonated, so they run as Local System inside the install transaction. -->
+    <CustomAction Id="GrantServiceAccess" FileRef="RefresherExe" ExeCommand="service grant"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <!-- Undoes the grant if the install fails after it, while the service still exists to name the account. Not
+         on a failed upgrade, where rollback restores the old product, which still needs the membership. -->
+    <CustomAction Id="RollbackServiceAccess" FileRef="RefresherExe" ExeCommand="service revoke"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <CustomAction Id="RevokeServiceAccess" FileRef="RefresherExe" ExeCommand="service revoke"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RollbackServiceAccess" Before="GrantServiceAccess" Condition="NOT REMOVE AND NOT WIX_UPGRADE_DETECTED" />
+      <Custom Action="GrantServiceAccess" After="InstallServices" Condition="NOT REMOVE" />
+      <!-- Only on a real uninstall: the uninstall inside an upgrade leaves the account for the new version. -->
+      <Custom Action="RevokeServiceAccess" Before="DeleteServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <Feature Id="Refresher">
+      <ComponentRef Id="License" />
+
+      <Component Directory="INSTALLFOLDER">
+        <File Id="RefresherExe" Source="$(var.PayloadDir)proof-refresher.exe" KeyPath="yes" />
+
+        <!-- Installed as Local System only because Windows Installer cannot name a virtual account before the
+             service exists (error 1923). GrantServiceAccess switches it to NT SERVICE\proof-refresher before it
+             first starts. -->
+        <ServiceInstall Name="proof-refresher"
+                        DisplayName="Proof Refresher"
+                        Description="Signs a Proof host token for each running VM and writes it into the VM over KVP."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Vital="yes">
+          <!-- Restart after a crash; a start that fails for settings or the key fails again the same way. -->
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="60"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+
+        <ServiceControl Name="proof-refresher" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+
+      <!-- The defaults. An upgrade replaces it, so machine settings go in refresher.json. -->
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(var.PayloadDir)appsettings.json" KeyPath="yes" />
+      </Component>
+    </Feature>
+
+  </Package>
+
+</Wix>

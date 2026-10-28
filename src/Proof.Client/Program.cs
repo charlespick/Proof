@@ -1,4 +1,5 @@
-﻿using Proof.Client;
+﻿using System.Reflection;
+using Proof.Client;
 using Proof.Shared;
 
 const string Help = """
@@ -9,6 +10,7 @@ const string Help = """
     proof status [--config <path>]
                           Show the host token (without printing it), what it says, and anything that would stop
                           an exchange.
+    proof --version       Print the version.
 
     Settings are read from /etc/proof/config.json on Linux and %ProgramData%\Proof\config.json on Windows:
       { "IssuerUrl": "https://id.example", "TokenEndpoint": "https://...", "CaBundlePath": "ca.pem" }
@@ -31,6 +33,7 @@ try
     {
         ["token", .. var rest] => await TokenAsync(rest),
         ["status", .. var rest] => Status(rest),
+        ["--version"] => PrintVersion(),
         _ => Usage(),
     };
 }
@@ -123,4 +126,10 @@ static int Usage()
 {
     Console.Error.WriteLine(Help);
     return ExitCodes.Usage;
+}
+
+static int PrintVersion()
+{
+    Console.WriteLine(typeof(ExitCodes).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion);
+    return ExitCodes.Ok;
 }

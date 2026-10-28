@@ -17,11 +17,18 @@ Proof does authentication only. Consumers decide what an identity may do. See [D
 
 ```
 Proof.slnx
+build/
+  Version.targets       versions from git tags
 docs/
   Design.md
+installer/              Windows MSIs (WiX)
+  Proof.Refresher.Installer/
+  Proof.Client.Installer/
+packaging/
+  debian/               the client .deb
 src/
   Proof.Shared/
-  Proof.Issuer/
+  Proof.Issuer/         includes the Dockerfile
   Proof.Refresher/
   Proof.Client/
 tests/
@@ -30,12 +37,38 @@ tests/
 
 ## Building and testing
 
-Requires the .NET SDK (10.0 or later). Tests use [xUnit v3](https://xunit.net/). NuGet versions are pinned in each project's `packages.lock.json`.
+Requires the .NET SDK (10.0 or later). Tests use [xUnit v3](https://xunit.net/). NuGet versions are pinned in each project's `packages.lock.json`, which also cover the `win-x64`, `linux-x64` and `linux-arm64` publishes. CI restores in locked mode, so a change to a package reference needs `dotnet restore Proof.slnx --force-evaluate` and the updated lock files committed.
 
 ```sh
 dotnet build Proof.slnx
 dotnet test --solution Proof.slnx
 ```
+
+## Packages and releases
+
+| Package | Built by | Contents |
+| ------- | -------- | -------- |
+| `proof-refresher-<version>-x64.msi` | `dotnet build installer/Proof.Refresher.Installer/Proof.Refresher.Installer.wixproj -c Release` (Windows) | `proof-refresher.exe` as the `proof-refresher` service |
+| `proof-<version>-x64.msi` | `dotnet build installer/Proof.Client.Installer/Proof.Client.Installer.wixproj -c Release` (Windows) | `proof.exe`, on the machine `PATH` |
+| `proof_<version>_amd64.deb` | `dotnet publish src/Proof.Client -c Release -r linux-x64`, then `packaging/debian/build-deb.sh` | `/usr/bin/proof` |
+| `ghcr.io/charlespick/proof-issuer:<version>` | `docker build -f src/Proof.Issuer/Dockerfile .` | The issuer, for `linux/amd64` and `linux/arm64` |
+
+Each MSI installs into `C:\Program Files\Proof` with `LICENSE.txt`. They build with [WiX](https://wixtoolset.org/) 5, which NuGet restores. `installer/Test-Installers.ps1` installs and removes both MSIs and checks what they do; it changes the machine, so CI runs it on a throwaway runner.
+
+[CI](.github/workflows/ci.yml) tests on Windows and Linux and builds every package on every push. A `v*` tag on a commit on `main` also publishes a GitHub release with the MSIs, the .deb and `SHA256SUMS`, and pushes the image (`latest` too, unless it is a prerelease).
+
+**Versions** come from the nearest tag, read by `git describe` in [build/Version.targets](build/Version.targets). Tag releases `vMAJOR.MINOR.PATCH`, with an optional dotted prerelease such as `v1.3.0-rc.1` (not `rc1`, which sorts as a string). Commits after a tag build as a prerelease of the next patch, which sorts below any tag that follows:
+
+| HEAD | Version | MSI ProductVersion | FileVersion | .deb version |
+| ---- | ------- | ------------------ | ----------- | ------------ |
+| at `v1.2.3` | `1.2.3` | `1.2.3` | `1.2.3.0` | `1.2.3` |
+| 4 commits after `v1.2.3` | `1.2.4-0.dev.4` | `1.2.4` | `1.2.4.4` | `1.2.4~0.dev.4` |
+| at `v1.3.0-rc.1` | `1.3.0-rc.1` | `1.3.0` | `1.3.0.0` | `1.3.0~rc.1` |
+| 4 commits after `v1.3.0-rc.1` | `1.3.0-rc.1.dev.4` | `1.3.0` | `1.3.0.4` | `1.3.0~rc.1.dev.4` |
+
+Windows Installer compares only the three-part ProductVersion. An MSI upgrades any installed build with a lower or equal ProductVersion in place, and refuses to install over a higher one. So builds of one version, prereleases included, replace each other in either direction, and going back to an older version means uninstalling first. The fourth FileVersion field tells builds of one version apart in Explorer. `--version` on both programs prints the full version and commit, for example `1.2.4-0.dev.4+1a2b3c4`.
+
+A build outside a git clone needs `-p:ProofVersion=<version>`. The container build takes it as `--build-arg VERSION=<version>`.
 
 ## Running the issuer
 
@@ -64,6 +97,29 @@ Proof__IssuerUrl=https://id.example Proof__AllowlistPath=allowlist.yaml Proof__S
 
 Behind an ingress, the rate limiter sees the client address only if forwarded headers are trusted, for example with `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` when only the ingress can reach the pod. The signing key is read at startup, so a rotation takes effect when the pods roll.
 
+### Container image
+
+The image runs the issuer as a non-root user (UID 1654) on a chiseled ASP.NET image, which has no shell. It serves HTTP on port 8080 and logs JSON to stdout. Two settings have defaults in the image, so only `Proof__IssuerUrl` must be set:
+
+| Setting | Image default | Mount |
+| ------- | ------------- | ----- |
+| `Proof__AllowlistPath` | `/etc/proof/allowlist/allowlist.yaml` | The allowlist ConfigMap, as a directory |
+| `Proof__SigningKeyPath` | `/etc/proof/signing/signing-key.pem` | The signing key Secret |
+
+On Kubernetes, point the liveness probe at `/healthz/live` and the readiness probe at `/healthz/ready`, both on port 8080, and terminate TLS at the ingress. Two replicas mount the same Secret (Design.md 8). The issuer writes nothing to disk, so `readOnlyRootFilesystem: true` should work; that has not been tried yet.
+
+To run it on its own with Docker, the files must be readable by UID 1654:
+
+```sh
+docker run -d --name proof-issuer -p 8080:8080 \
+  -e Proof__IssuerUrl=https://id.example \
+  -v "$PWD/allowlist:/etc/proof/allowlist:ro" \
+  -v "$PWD/signing:/etc/proof/signing:ro" \
+  ghcr.io/charlespick/proof-issuer:1.2.3
+```
+
+Clients only talk to an `https` issuer. Without a proxy in front of it, Kestrel can serve TLS itself: add `-e ASPNETCORE_HTTPS_PORTS=8443 -e ASPNETCORE_Kestrel__Certificates__Default__Path=/etc/proof/tls/tls.crt -e ASPNETCORE_Kestrel__Certificates__Default__KeyPath=/etc/proof/tls/tls.key`, mount the certificate there, and publish port 8443.
+
 ## Running the refresher
 
 The refresher runs on each Hyper-V host, elevated or as a service. It writes a new host token to `proof.v1.token` in a VM's KVP External pool when that VM has none from this host yet, or its token is 5 minutes old. Tokens live 20 minutes.
@@ -82,23 +138,43 @@ Settings come from `appsettings.json` next to the executable, then `%ProgramData
 | `HostKeyName` | `Proof Host Key` | CNG key name. Use a new name to rotate (Design.md 7.3) |
 | `ScanInterval` | `00:05:00` | Time between scheduled passes, at most 5 minutes. Starts and migrations get their own pass |
 
-Set up a host (elevated):
+The MSI is meant for configuration management, and fails without changing anything unless the host is already set up: it needs `%ProgramData%\Proof\refresher.json`, and the service must start, which it does only with valid settings and a usable host key. When the service cannot start, `msiexec` exits with 1603 after about 45 seconds (Windows waits 30 seconds for the service) (error 1920 in the MSI log), and the Application event log (source `proof-refresher`) says why. Set up a host (elevated):
 
 ```powershell
 New-Item -ItemType Directory -Force $env:ProgramData\Proof
 '{ "Proof": { "IssuerUrl": "https://id.corp.example", "Cluster": "prod" } }' | Set-Content $env:ProgramData\Proof\refresher.json
-proof-refresher key create          # prints the allowlist entry to add by pull request
-proof-refresher once                # write to every running VM now and report
-sc.exe create proof-refresher binPath= "C:\Program Files\Proof\proof-refresher.exe" start= auto
-sc.exe start proof-refresher
+
+# The host key, created as `proof-refresher key create` would: a non-exportable P-256 machine key that SYSTEM and
+# Administrators may use. Skipped when it exists, so this can run on every configuration pass.
+$ksp = [Security.Cryptography.CngProvider]::MicrosoftSoftwareKeyStorageProvider
+if (-not [Security.Cryptography.CngKey]::Exists('Proof Host Key', $ksp, [Security.Cryptography.CngKeyOpenOptions]::MachineKey)) {
+    $p = [Security.Cryptography.CngKeyCreationParameters]::new()
+    $p.Provider = $ksp
+    $p.KeyCreationOptions = [Security.Cryptography.CngKeyCreationOptions]::MachineKey
+    $p.ExportPolicy = [Security.Cryptography.CngExportPolicies]::None
+    $p.KeyUsage = [Security.Cryptography.CngKeyUsages]::Signing
+    [Security.Cryptography.CngKey]::Create([Security.Cryptography.CngAlgorithm]::ECDsaP256, 'Proof Host Key', $p).Dispose()
+}
+
+msiexec /i proof-refresher-1.2.3-x64.msi /qn /l*v proof-refresher-install.log
+& "C:\Program Files\Proof\proof-refresher.exe" key show   # prints the allowlist entry to add by pull request
+& "C:\Program Files\Proof\proof-refresher.exe" once       # write to every running VM now and report
 ```
 
-`proof-refresher key show` prints the entry again, along with who may use the key. To run the service under its virtual account instead of Local System, install it first, then `key create --grant "NT SERVICE\proof-refresher"`, then `sc.exe config proof-refresher obj= "NT SERVICE\proof-refresher"`. The account also needs Hyper-V rights (Design.md 14, item 6).
+The MSI installs the `proof-refresher` service to start automatically and restart a minute after a crash. It runs as its virtual account, `NT SERVICE\proof-refresher`, which has no password and needs no network access. Before the service first starts, the MSI runs `proof-refresher service grant`, which gives that account:
 
-Publish as a self-contained single file (NativeAOT does not work, because WMI needs built-in COM):
+- membership of Hyper-V Administrators. Without it, Hyper-V shows the account no VMs, so the refresher writes nothing and logs no error, and `proof.refresher.running_vms` reads 0;
+- read on the host key named in the settings;
+- the `proof-refresher` event log source, which only an administrator can register.
+
+Windows Installer cannot install a service under a virtual account directly, so the MSI installs it as Local System and the grant step switches it to the virtual account. Upgrades and repairs run the grant again. After creating a new host key to rotate (Design.md 7.3), run `proof-refresher service grant`, or repair with `msiexec /fa`, before restarting the service. Uninstalling takes the account out of Hyper-V Administrators, removes the service, and leaves the settings, the host key and the event source.
+
+Without the MSI, `proof-refresher key create` makes the key and prints the entry. Then `sc.exe create proof-refresher binPath= "C:\Program Files\Proof\proof-refresher.exe" start= auto` and `proof-refresher service grant` set up the service as the MSI would. `proof-refresher key show` prints the entry again, along with who may use the key.
+
+Publish as a self-contained single file (NativeAOT does not work, because WMI needs built-in COM). The project sets self-contained and single-file whenever a runtime is given:
 
 ```sh
-dotnet publish src/Proof.Refresher -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
+dotnet publish src/Proof.Refresher -c Release -r win-x64
 ```
 
 Metrics are on the `Proof.Refresher` meter:
@@ -148,7 +224,7 @@ To keep a token file fresh, run `proof token --out` on a timer well inside the i
 # /etc/systemd/system/proof-token.service
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/proof token --audience sts.example --out /run/proof/token --wait 60
+ExecStart=/usr/bin/proof token --audience sts.example --out /run/proof/token --wait 60
 
 # /etc/systemd/system/proof-token.timer
 [Timer]
@@ -160,14 +236,19 @@ WantedBy=timers.target
 
 On Windows, a scheduled task that repeats every 2 minutes does the same job.
 
-Publish as a self-contained, trimmed single file (about 15 MB on win-x64 and 17 MB on linux-x64). Globalization is invariant, so Linux images need no ICU. TLS still needs OpenSSL (`libssl`), as for any .NET app:
+Install it from a package:
+
+- **Windows**: `msiexec /i proof-1.2.3-x64.msi /qn` installs `C:\Program Files\Proof\proof.exe` and puts that folder on the machine `PATH` (new processes see it). The MSI does not write `config.json`.
+- **Debian and Ubuntu**: `apt-get install ./proof_1.2.3_amd64.deb` installs `/usr/bin/proof` and an empty `/etc/proof`. It depends on `libssl` and `ca-certificates`, and recommends `hyperv-daemons` (Debian) or `linux-cloud-tools-virtual` (Ubuntu) for `hv_kvp_daemon`. The image supplies `config.json`.
+
+The packages hold a self-contained, trimmed single file (about 15 MB on win-x64 and 17 MB on linux-x64), which the project builds whenever a runtime is given. Globalization is invariant, so Linux images need no ICU. TLS still needs OpenSSL (`libssl`), as for any .NET app:
 
 ```sh
-dotnet publish src/Proof.Client -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true
-dotnet publish src/Proof.Client -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true
+dotnet publish src/Proof.Client -c Release -r linux-x64
+dotnet publish src/Proof.Client -c Release -r win-x64
 ```
 
-The project has the AOT analyzers on, and `-p:PublishAot=true` compiles without warnings. Linking a NativeAOT build needs the platform toolchain on a machine of the target OS, and that build has not been tried.
+The project has the AOT analyzers on, and `-p:PublishAot=true -p:PublishSingleFile=false` compiles without warnings. Linking a NativeAOT build needs the platform toolchain on a machine of the target OS, and that build has not been tried.
 
 ## Status
 
@@ -175,3 +256,8 @@ The project has the AOT analyzers on, and `-p:PublishAot=true` compiles without 
 - `Proof.Issuer`: implemented. Token exchange, allowlist loading and reload, discovery, JWKS, health, rate limits and metrics (`Proof.Issuer` meter), with the section 12 negative tests.
 - `Proof.Refresher`: implemented. Host key management, host token signing, KVP writes over WMI, the refresh loop, metrics, and the `key` and `once` commands. Tested end to end on a Windows Server 2025 Hyper-V host against the issuer.
 - `Proof.Client`: implemented. KVP reads on Linux (pool files) and Windows (registry), token exchange, token files, `token` and `status`. Linux pool reading was tested against synthetic pool files with a competing fcntl lock, not yet against a real `hv_kvp_daemon`. The Windows registry path was checked on a Hyper-V guest whose host has no refresher. No exchange has run end to end on a real VM yet.
+- Packaging: both MSIs were installed, upgraded, repaired, refused a downgrade and uninstalled on Windows Server 2025, including the refresher MSI's refusals without settings or host key, and the refresher writing KVP to a VM as its virtual account. The .deb, the container image and the workflow have not run yet; CI runs them on the first push.
+
+## License
+
+[Apache License 2.0](LICENSE).
