@@ -4,6 +4,10 @@
     <ProjectReference Include="..\Proof.Shared\Proof.Shared.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>proof-issuer</AssemblyName>

@@ -202,7 +202,7 @@ There is no separate client credential: the signed host token is the credential.
 
 `token_type` is `N_A` because the issued token is a JWT assertion rather than an access token. Clients that expect `Bearer` should ignore the field and use `access_token`.
 
-**Errors (HTTP 400)** carry a JSON `error` and a generic `error_description`: `invalid_request` for missing or malformed fields, `invalid_grant` for any problem with the host token, and `invalid_target` if an audience allowlist is configured and the audience is not on it. Verify the exact error codes against RFC 8693 and RFC 8707 before building. Detail goes to logs, never to the caller. Rate-limit by source address.
+**Errors (HTTP 400)** carry a JSON `error` and a generic `error_description`: `invalid_request` for missing or malformed fields and for any problem with the host token, `invalid_target` if an audience allowlist is configured and the audience is not on it (or a `resource` parameter is sent), and `unsupported_grant_type` for any other `grant_type`. RFC 8693 section 2.2.2 requires `invalid_request`, not `invalid_grant`, when the `subject_token` is invalid or unacceptable by policy (verified). Detail goes to logs, never to the caller. Rate-limit by source address.
 
 ### 6.4 Issued JWT
 
@@ -291,7 +291,7 @@ hosts:
         jwk: { kty: EC, crv: P-256, x: <base64url>, y: <base64url> }
 ```
 
-- An unknown `kid` is rejected. A `retired` key is accepted until `not_after` and then ignored.
+- An unknown `kid` is rejected. A `retired` key is accepted until `not_after` and then ignored. `not_after` is a `YYYY-MM-DD` date and covers that whole UTC day; it also ends an `active` key. A `retired` key must have one: to stop trusting a key now, remove it.
 - Reload on file change with an atomic swap. A file that fails validation is refused: keep the previous list and alert. Mount the ConfigMap as a directory, not as a subPath mount, because Kubernetes does not update subPath mounts (verify on your cluster version).
 - Removing a key stops new exchanges immediately. Tokens already issued live until they expire, at most 10 minutes. This is allowlist hygiene, not a revocation feature.
 - Cluster scoping is optional: require the host token's `cluster` to match the host's entry. KVP follows a VM through live migration, so list every host in a cluster that may sign for its VMs.
@@ -336,7 +336,7 @@ A stateless issuer and a small refresher on each host keep operations simple. Th
 | Refresher down on a host | Tokens expire within 20 minutes; token requests from that host's VMs fail. Issued tokens stay valid until they expire | Alert on stale tokens |
 | Issuer down | Exchanges fail; consumers keep accepting unexpired tokens | Two replicas |
 | Allowlist file invalid | Issuer keeps the previous list | Alert; fix through a pull request |
-| Clock skew beyond 2 minutes | Exchanges fail with `invalid_grant` | Fix NTP |
+| Clock skew beyond 2 minutes | Exchanges fail with `invalid_request` | Fix NTP |
 | Host key lost or replaced | VMs on that host get no tokens until the new key is allowlisted | Allowlist the new key as part of the host rebuild |
 | Issuer key lost | Nothing can be issued; verifiers see an unknown `kid` | Restore from backup |
 

@@ -30,13 +30,42 @@ tests/
 
 ## Building and testing
 
-Requires the .NET SDK (10.0 or later). Tests use [xUnit v3](https://xunit.net/).
+Requires the .NET SDK (10.0 or later). Tests use [xUnit v3](https://xunit.net/). NuGet versions are pinned in each project's `packages.lock.json`.
 
 ```sh
 dotnet build Proof.slnx
 dotnet test --solution Proof.slnx
 ```
 
+## Running the issuer
+
+The issuer reads its settings from the `Proof` configuration section (environment variables use `Proof__Name`):
+
+| Setting | Default | Meaning |
+| ------- | ------- | ------- |
+| `IssuerUrl` | required | `https`, no trailing slash. The `iss` of issued JWTs and the `aud` host tokens must carry |
+| `AllowlistPath` | required | Host allowlist YAML (Design.md 7.2). Mount the ConfigMap as a directory, not a subPath |
+| `AllowlistPollInterval` | `00:00:10` | How often the allowlist is reread. An invalid file is refused and the previous list kept |
+| `SigningKeyPath` | required | PEM ECDSA P-256 private key (SEC1 or PKCS#8) |
+| `AdditionalPublicKeyPaths` | none | PEM public keys also published in the JWKS, for rotation |
+| `IssuedTokenLifetime` | `00:05:00` | At most `00:10:00` |
+| `AllowedAudiences` | none (any) | If set, other audiences get `invalid_target` |
+| `EnforceClusterScope` | `false` | Require a host token's `cluster` to match its host's allowlist entry |
+| `TokenRequestsPerMinute` | `60` | Rate limit per source address on `/token` |
+
+Endpoints: `POST /token`, `GET /.well-known/openid-configuration`, `GET /.well-known/jwks.json`, `GET /healthz/live`, and `GET /healthz/ready` (ready once an allowlist has loaded).
+
+To try it locally:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out signing-key.pem
+Proof__IssuerUrl=https://id.example Proof__AllowlistPath=allowlist.yaml Proof__SigningKeyPath=signing-key.pem dotnet run --project src/Proof.Issuer
+```
+
+Behind an ingress, the rate limiter sees the client address only if forwarded headers are trusted, for example with `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` when only the ingress can reach the pod. The signing key is read at startup, so a rotation takes effect when the pods roll.
+
 ## Status
 
-Scaffold only. The projects are template stubs. The only libraries chosen so far are xUnit v3 for tests and `Microsoft.Extensions.Hosting.WindowsServices` for the refresher.
+- `Proof.Shared`: claim names, token types, host-token policy and key helpers (JWK and RFC 7638 `kid`).
+- `Proof.Issuer`: implemented. Token exchange, allowlist loading and reload, discovery, JWKS, health, rate limits and metrics (`Proof.Issuer` meter), with the section 12 negative tests.
+- `Proof.Refresher` and `Proof.Client`: template stubs.
