@@ -32,6 +32,15 @@ public sealed class ClientOptions
 
     public static ClientOptions Load(string path)
     {
+        // The machine-wide file names the issuer and its CA, so only administrators may be able to change it. A
+        // --config file the caller chose is the caller's business.
+        if (OperatingSystem.IsWindows()
+            && string.Equals(Path.GetFullPath(path), DefaultPath, StringComparison.OrdinalIgnoreCase)
+            && SettingsFileSecurity.FindProblem(path) is { } problem)
+        {
+            throw new ClientConfigException($"Refusing {path}. {problem}");
+        }
+
         string text;
         try
         {

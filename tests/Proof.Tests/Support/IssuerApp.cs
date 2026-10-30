@@ -1,6 +1,9 @@
+using System.Net;
 using System.Security.Cryptography;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 using Proof.Issuer;
 
 namespace Proof.Tests.Support;
@@ -34,6 +37,9 @@ public sealed class IssuerApp : WebApplicationFactory<IssuerOptions>
     }
 
     public ECDsa SigningKey { get; }
+
+    /// <summary>The address every request appears to come from. The test server sets none.</summary>
+    public IPAddress? RemoteAddress { get; init; }
     public string AllowlistPath => Path.Combine(directory, "allowlist.yaml");
     public string SigningKeyPath => Path.Combine(directory, "signing-key.pem");
 
@@ -52,6 +58,25 @@ public sealed class IssuerApp : WebApplicationFactory<IssuerOptions>
         {
             builder.UseSetting(key, value);
         }
+
+        if (RemoteAddress is { } address)
+        {
+            builder.ConfigureServices(services => services.AddSingleton<IStartupFilter>(new RemoteAddressFilter(address)));
+        }
+    }
+
+    /// <summary>Sets the connection's address ahead of the issuer's own middleware, as a real connection would.</summary>
+    private sealed class RemoteAddressFilter(IPAddress address) : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use((http, nextMiddleware) =>
+            {
+                http.Connection.RemoteIpAddress = address;
+                return nextMiddleware(http);
+            });
+            next(app);
+        };
     }
 
     protected override void Dispose(bool disposing)

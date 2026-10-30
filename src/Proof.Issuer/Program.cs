@@ -1,6 +1,7 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
@@ -40,8 +41,15 @@ builder.Services.AddSingleton<TokenMinter>();
 builder.Services.AddHealthChecks()
     .AddCheck<AllowlistReadinessCheck>("allowlist", tags: ["ready"]);
 
-// Behind the ingress, RemoteIpAddress is the caller only if forwarded headers are trusted
-// (for example ASPNETCORE_FORWARDEDHEADERS_ENABLED=true when only the ingress can reach the pod).
+// ASP.NET Core's own switch trusts X-Forwarded-For from any address that can reach the pod, so a caller could pick
+// its own rate-limit partition. Proof:TrustedProxies trusts only the named proxies.
+if (string.Equals(builder.Configuration["ForwardedHeaders_Enabled"], "true", StringComparison.OrdinalIgnoreCase))
+{
+    throw new InvalidOperationException(
+        "ASPNETCORE_FORWARDEDHEADERS_ENABLED trusts forwarded headers from any address. Unset it and list the ingress in Proof:TrustedProxies instead.");
+}
+
+// Behind the ingress, RemoteIpAddress is the caller only once forwarded headers from Proof:TrustedProxies are applied.
 builder.Services.AddRateLimiter(limiter =>
 {
     limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -63,6 +71,23 @@ var app = builder.Build();
 
 // Fail at startup, not on the first request, if the signing key is missing or wrong.
 app.Services.GetRequiredService<SigningKeys>();
+
+var trustedProxies = app.Services.GetRequiredService<IOptions<IssuerOptions>>().Value.TrustedProxies;
+if (trustedProxies.Count > 0)
+{
+    // Only the source address: the issuer URL is configured, never taken from Host or X-Forwarded-Proto.
+    // ForwardLimit 1 takes only the rightmost entry, the one the trusted proxy added.
+    var forwarded = new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor, ForwardLimit = 1 };
+    forwarded.KnownProxies.Clear();
+    forwarded.KnownIPNetworks.Clear();
+    foreach (var proxy in trustedProxies)
+    {
+        IssuerOptions.TryParseNetwork(proxy, out var network);
+        forwarded.KnownIPNetworks.Add(network);
+    }
+
+    app.UseForwardedHeaders(forwarded);
+}
 
 app.UseRateLimiter();
 

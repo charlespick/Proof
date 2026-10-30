@@ -293,6 +293,56 @@ public sealed class IssuerEndpointTests : IDisposable
         Assert.Equal([HttpStatusCode.OK, HttpStatusCode.OK, HttpStatusCode.TooManyRequests], statuses);
     }
 
+    /// <summary>Two requests through a proxy at 10.0.0.5, for two different callers, with a limit of one per minute.</summary>
+    private async Task<List<HttpStatusCode>> PostAsTwoCallersAsync(Dictionary<string, string?> settings, string firstCaller = "192.0.2.1", string secondCaller = "192.0.2.2")
+    {
+        settings["Proof:TokenRequestsPerMinute"] = "1";
+        using var proxied = new IssuerApp(TestHost.Allowlist(host.AllowlistEntry()), settings) { RemoteAddress = IPAddress.Parse("10.0.0.5") };
+        using var proxiedClient = proxied.CreateClient();
+        var ct = TestContext.Current.CancellationToken;
+
+        var statuses = new List<HttpStatusCode>();
+        foreach (var caller in new[] { firstCaller, secondCaller })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, TokenEndpoint.Path)
+            {
+                Content = new FormUrlEncodedContent(ExchangeForm(host.CreateToken())),
+            };
+            // A caller's own spoofed entry first, then the one the proxy appends.
+            request.Headers.Add("X-Forwarded-For", $"203.0.113.9, {caller}");
+            statuses.Add((await proxiedClient.SendAsync(request, ct)).StatusCode);
+        }
+
+        return statuses;
+    }
+
+    [Fact]
+    public async Task RateLimitsByTheAddressATrustedProxyForwards()
+    {
+        Assert.Equal(
+            [HttpStatusCode.OK, HttpStatusCode.OK],
+            await PostAsTwoCallersAsync(new() { ["Proof:TrustedProxies:0"] = "10.0.0.0/24" }));
+        Assert.Equal(
+            [HttpStatusCode.OK, HttpStatusCode.TooManyRequests],
+            await PostAsTwoCallersAsync(new() { ["Proof:TrustedProxies:0"] = "10.0.0.5" }, secondCaller: "192.0.2.1"));
+    }
+
+    [Fact]
+    public async Task IgnoresForwardedAddressesFromUntrustedConnections()
+    {
+        Assert.Equal([HttpStatusCode.OK, HttpStatusCode.TooManyRequests], await PostAsTwoCallersAsync(new()));
+        Assert.Equal(
+            [HttpStatusCode.OK, HttpStatusCode.TooManyRequests],
+            await PostAsTwoCallersAsync(new() { ["Proof:TrustedProxies:0"] = "10.0.1.0/24" }));
+    }
+
+    [Fact]
+    public void RefusesToStartWithAspNetCoreForwardedHeadersSwitch()
+    {
+        using var bad = new IssuerApp(TestHost.Allowlist(host.AllowlistEntry()), new() { ["ForwardedHeaders_Enabled"] = "true" });
+        Assert.ThrowsAny<Exception>(() => bad.CreateClient());
+    }
+
     [Fact]
     public async Task ReadyOnlyAfterAllowlistLoads()
     {
@@ -309,6 +359,8 @@ public sealed class IssuerEndpointTests : IDisposable
     [InlineData("Proof:IssuerUrl", "http://proof.test")]
     [InlineData("Proof:IssuerUrl", "https://proof.test/")]
     [InlineData("Proof:IssuedTokenLifetime", "00:11:00")]
+    [InlineData("Proof:TrustedProxies:0", "ingress")]
+    [InlineData("Proof:TrustedProxies:0", "10.0.0.1/8")]
     public void RefusesToStartWithInvalidOptions(string key, string value)
     {
         using var bad = new IssuerApp(TestHost.Allowlist(host.AllowlistEntry()), new() { [key] = value });

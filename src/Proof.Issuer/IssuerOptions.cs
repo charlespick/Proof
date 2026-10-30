@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.Options;
 using Proof.Shared;
 
@@ -41,6 +43,34 @@ public sealed class IssuerOptions
 
     /// <summary><c>/token</c> requests allowed per source address per minute.</summary>
     public int TokenRequestsPerMinute { get; set; } = 60;
+
+    /// <summary>
+    /// Addresses or CIDR networks of the proxies in front of the issuer, such as the ingress pods. Only a connection
+    /// from one of these may set the source address with <c>X-Forwarded-For</c>, and only the rightmost entry is
+    /// taken, the one that proxy added. Empty means the connection's own address is the source.
+    /// </summary>
+    public List<string> TrustedProxies { get; set; } = [];
+
+    /// <summary>A <see cref="TrustedProxies"/> entry: a CIDR network, or a single address.</summary>
+    public static bool TryParseNetwork(string? value, out IPNetwork network)
+    {
+        network = default;
+        if (value is null)
+        {
+            return false;
+        }
+
+        if (IPAddress.TryParse(value, out var address) && !value.Contains('/'))
+        {
+            network = new IPNetwork(address, address.AddressFamily == AddressFamily.InterNetwork ? 32 : 128);
+            return true;
+        }
+
+        // .NET masks host bits away, so 10.0.0.5/8 would quietly trust all of 10/8. Refuse it instead.
+        return IPNetwork.TryParse(value, out network)
+            && IPAddress.TryParse(value.AsSpan(0, value.IndexOf('/')), out var written)
+            && written.Equals(network.BaseAddress);
+    }
 }
 
 public sealed class IssuerOptionsValidator : IValidateOptions<IssuerOptions>
@@ -82,6 +112,11 @@ public sealed class IssuerOptionsValidator : IValidateOptions<IssuerOptions>
         if (options.TokenRequestsPerMinute <= 0)
         {
             errors.Add("Proof:TokenRequestsPerMinute must be positive.");
+        }
+
+        if (options.TrustedProxies.FirstOrDefault(p => !IssuerOptions.TryParseNetwork(p, out _)) is { } bad)
+        {
+            errors.Add($"Proof:TrustedProxies entry '{bad}' is not an IP address or a CIDR network such as 10.1.0.0/16.");
         }
 
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);

@@ -85,6 +85,7 @@ The issuer reads its settings from the `Proof` configuration section (environmen
 | `AllowedAudiences` | none (any) | If set, other audiences get `invalid_target` |
 | `EnforceClusterScope` | `false` | Require a host token's `cluster` to match its host's allowlist entry |
 | `TokenRequestsPerMinute` | `60` | Rate limit per source address on `/token` |
+| `TrustedProxies` | none | Addresses or CIDR networks of the ingress. Only these may set the source address with `X-Forwarded-For` |
 
 Endpoints: `POST /token`, `GET /.well-known/openid-configuration`, `GET /.well-known/jwks.json`, `GET /healthz/live`, and `GET /healthz/ready` (ready once an allowlist has loaded).
 
@@ -95,7 +96,7 @@ openssl ecparam -name prime256v1 -genkey -noout -out signing-key.pem
 Proof__IssuerUrl=https://id.example Proof__AllowlistPath=allowlist.yaml Proof__SigningKeyPath=signing-key.pem dotnet run --project src/Proof.Issuer
 ```
 
-Behind an ingress, the rate limiter sees the client address only if forwarded headers are trusted, for example with `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` when only the ingress can reach the pod. The signing key is read at startup, so a rotation takes effect when the pods roll.
+Behind an ingress, every connection comes from the ingress, so without `TrustedProxies` all callers share one rate-limit bucket. List the ingress pods' network in `TrustedProxies` (for example `Proof__TrustedProxies__0=10.42.0.0/16`): the issuer then takes the source address from the rightmost `X-Forwarded-For` entry, the one the ingress added, and only on connections from those addresses. The issuer refuses to start with `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true`, because that trusts forwarded headers from any address that can reach the pod. The signing key is read at startup, so a rotation takes effect when the pods roll.
 
 ### Container image
 
@@ -137,6 +138,8 @@ Settings come from `appsettings.json` next to the executable, then `%ProgramData
 | `Cluster` | none | This host's `cluster` in the allowlist. Omit for a standalone host |
 | `HostKeyName` | `Proof Host Key` | CNG key name. Use a new name to rotate (Design.md 7.3) |
 | `ScanInterval` | `00:05:00` | Time between scheduled passes, at most 5 minutes. Starts and migrations get their own pass |
+
+Any user may create folders and files under `%ProgramData%` and then owns them, so a user could create `Proof\refresher.json` before an administrator does and edit it later. The refresher refuses to start, and its commands refuse to run, if `%ProgramData%\Proof` or `refresher.json` is a link, is owned by anyone but SYSTEM, Administrators or TrustedInstaller, or lets anyone else change or replace the file. The error names the account and the `icacls` command that fixes it. A folder and file an elevated administrator creates, as below, pass with the access they inherit from `%ProgramData%`.
 
 The MSI is meant for configuration management, and fails without changing anything unless the host is already set up: it needs `%ProgramData%\Proof\refresher.json`, and the service must start, which it does only with valid settings and a usable host key. When the service cannot start, `msiexec` exits with 1603 after about 45 seconds (Windows waits 30 seconds for the service) (error 1920 in the MSI log), and the Application event log (source `proof-refresher`) says why. Set up a host (elevated):
 
@@ -210,6 +213,8 @@ Settings are in `/etc/proof/config.json` on Linux and `%ProgramData%\Proof\confi
 | `IssuerUrl` | required | Exactly the issuer's `IssuerUrl`. Baked into the image, never learned from KVP |
 | `TokenEndpoint` | `IssuerUrl` + `/token` | Set it when `/token` is served at an internal name while the discovery documents are hosted publicly (Design.md 6.5) |
 | `CaBundlePath` | system store | PEM CA certificates. When set, the issuer's certificate must chain to one of them, and the system store is not used. Relative to the settings file |
+
+On Windows, `proof` refuses `%ProgramData%\Proof\config.json` under the same rule as the refresher's settings: SYSTEM, Administrators or TrustedInstaller must own it and its folder, and no one else may change it. A file passed with `--config` is not checked.
 
 Where the client reads KVP:
 

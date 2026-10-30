@@ -80,6 +80,7 @@ internal static class Commands
         // service has no console: under the service host the logger writes to the Application event log.
         try
         {
+            VerifyMachineSettings();
             host.Services.GetRequiredService<HostTokenSigner>();
         }
         catch (Exception ex)
@@ -160,7 +161,7 @@ internal static class Commands
         {
             options = LoadOptions();
         }
-        catch (Exception ex) when (ex is OptionsValidationException or InvalidDataException or FormatException)
+        catch (Exception ex) when (ex is OptionsValidationException or InvalidDataException or FormatException or InvalidOperationException)
         {
             Console.Error.WriteLine($"Settings could not be read, so no host key was granted: {ex.Message}");
             return 0;
@@ -199,6 +200,7 @@ internal static class Commands
             return Usage();
         }
 
+        VerifyMachineSettings();
         using var host = CreateBuilder([]).Build();
         var refresher = host.Services.GetRequiredService<TokenRefresher>();
         var pass = await refresher.RefreshAsync(
@@ -254,9 +256,22 @@ internal static class Commands
     private static string MachineSettingsPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Proof", "refresher.json");
 
+    /// <summary>
+    /// Refuses machine settings that someone other than SYSTEM or an administrator could have changed: they name the
+    /// host, its cluster and its key.
+    /// </summary>
+    private static void VerifyMachineSettings()
+    {
+        if (Proof.Shared.SettingsFileSecurity.FindProblem(MachineSettingsPath) is { } problem)
+        {
+            throw new InvalidOperationException($"Refusing the machine settings. {problem}");
+        }
+    }
+
     /// <summary>Options for the key commands. The issuer URL is not needed to manage the key.</summary>
     private static RefresherOptions LoadOptions()
     {
+        VerifyMachineSettings();
         var configuration = new ConfigurationBuilder()
             .SetBasePath(AppContext.BaseDirectory)
             .AddJsonFile("appsettings.json", optional: true)

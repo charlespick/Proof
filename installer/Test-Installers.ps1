@@ -103,6 +103,13 @@ try {
     Check ((Invoke-Msi '/fa' $RefresherMsi 'refresher-repair') -eq 0) 'a repair succeeds'
     Check (Test-InHyperVAdministrators) '...and puts the account back in Hyper-V Administrators'
     Check ((Get-Service proof-refresher).Status -eq 'Running') '...and the service is running'
+    # Settings an ordinary user could change are refused. The grant is explicit, so removing it leaves the inherited access.
+    icacls $settingsFile /grant '*S-1-5-32-545:(M)' | Out-Null
+    $refused = & "$installDir\proof-refresher.exe" key show 2>&1 | Out-String
+    Check (($LASTEXITCODE -eq 1) -and ($refused -match 'Refusing the machine settings')) 'the refresher refuses settings Users can change'
+    icacls $settingsFile /remove:g '*S-1-5-32-545' | Out-Null
+    Check ((& "$installDir\proof-refresher.exe" key show 2>&1 | Out-String) -match 'Access:') '...and accepts them again once only administrators can'
+
     if ($ExpectedVersion) {
         $v = & "$installDir\proof-refresher.exe" --version
         Check ($v -eq $ExpectedVersion) "proof-refresher --version prints $ExpectedVersion (got $v)"
