@@ -26,6 +26,9 @@ public sealed class TestHost
     public JsonWebKey Jwk { get; }
     public string Kid => Jwk.Kid;
 
+    /// <summary>The <c>sub</c> the issuer gives this host's VM: scoped by its cluster, or by the host when it has none.</summary>
+    public string Subject => Cluster is null ? $"host:{HostId}/{VmId}" : $"cluster:{Cluster}/{VmId}";
+
     /// <summary>This host's allowlist entry as YAML, indented to sit under <c>hosts:</c>.</summary>
     public string AllowlistEntry(string status = "active", string? notAfter = null, string? clusterOverride = null)
     {

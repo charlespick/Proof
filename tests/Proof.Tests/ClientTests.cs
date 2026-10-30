@@ -70,7 +70,7 @@ public sealed class ClientTests : IDisposable
         Assert.EndsWith(Environment.NewLine, printed);
         var result = await ValidateIssuedAsync(printed.TrimEnd(), "my-service");
         Assert.True(result.IsValid, result.Exception?.Message);
-        Assert.Equal(TestHost.VmId, ((JsonWebToken)result.SecurityToken).Subject);
+        Assert.Equal(host.Subject, ((JsonWebToken)result.SecurityToken).Subject);
         Assert.Empty(stderr.ToString());
     }
 

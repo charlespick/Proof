@@ -13,14 +13,13 @@ public sealed class ValidatorHarness : IDisposable
     private readonly string directory = Directory.CreateTempSubdirectory("proof-validator-tests-").FullName;
     private readonly ServiceProvider services = new ServiceCollection().AddMetrics().BuildServiceProvider();
 
-    public ValidatorHarness(string allowlistYaml, bool enforceClusterScope = false)
+    public ValidatorHarness(string allowlistYaml)
     {
         Options = new IssuerOptions
         {
             IssuerUrl = TestHost.IssuerUrl,
             AllowlistPath = Path.Combine(directory, "allowlist.yaml"),
             SigningKeyPath = "unused",
-            EnforceClusterScope = enforceClusterScope,
         };
         Monitor = new AllowlistMonitor(
             Microsoft.Extensions.Options.Options.Create(Options),

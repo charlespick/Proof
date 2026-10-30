@@ -35,7 +35,7 @@ Thirteen decisions are settled or proposed. "Decided" means you chose it in our 
 | # | Decision | Reason | Status |
 | --- | --- | --- | --- |
 | 1 | Authentication only: no roles, labels or authorization policy | The issuer says who a VM is; consumers decide what it may do | Decided |
-| 2 | Subject is the Hyper-V VM ID | Names can repeat across clusters and can be renamed; the VM ID cannot | Decided |
+| 2 | Subject is the Hyper-V VM ID, scoped by the signing host's failover cluster, or by the host when it is in none: `cluster:<cluster>/<vmid>` or `host:<host>/<vmid>`, taken from the allowlist | Names can repeat and can be renamed; the VM ID cannot. But VM IDs are unique only within a cluster or a standalone host: an import or a restore elsewhere keeps the ID | Decided |
 | 3 | Host trust is one layer: each host has its own key, and the issuer holds an allowlist of host public keys. Removing a key ends trust in it | No CA hierarchy; revocation is the allowlist edit | Decided |
 | 4 | Token lifetime is the only leak and replay control. No proof of possession, no replay counter | Short lifetimes already bound the exposure | Decided |
 | 5 | No SPIRE. Build the issuer on JOSE libraries | Less to run; libraries do the cryptography | Decided |
@@ -132,9 +132,9 @@ Header: `{"alg":"ES256","typ":"proof-host+jwt","kid":"<host key thumbprint>"}`
 | --- | --- | --- |
 | `iss` | Host ID from the allowlist | Must match the allowlist entry for `kid` |
 | `aud` | The issuer URL | One fixed audience |
-| `sub` | VM ID, lowercase hyphenated GUID | This is the identity |
+| `sub` | `cluster:<cluster>/<vmid>` if the signing key's allowlist entry has a cluster, otherwise `host:<host>/<vmid>`. The VM ID is the host token's `sub` | The issuer scopes it by the host's allowlist entry (6.4) |
 | `vm_name` | VM name at signing time | Host-asserted and informational; never authorize on it |
-| `cluster` | Cluster name | Optional; used to scope hosts |
+| `cluster` | Cluster name | Present exactly when the host's allowlist entry has a cluster, and equal to it |
 | `iat`, `nbf`, `exp` | Signing time; `exp` = `iat` + 20 minutes | Proposed. Refresh every 5 minutes |
 | `jti` | Random 128-bit value | For logs only |
 
@@ -190,8 +190,8 @@ There is no separate client credential: the signed host token is the credential.
 3. Verify the signature with that key.
 4. `iss` equals the host recorded for that `kid`; `aud` equals the issuer URL.
 5. `nbf` and `exp` hold within 2 minutes of skew, and `exp` minus `iat` is at most 30 minutes.
-6. Required claims are present and `sub` is a GUID.
-7. If cluster scoping is configured, `cluster` matches the host entry.
+6. Required claims are present and `sub` is a lowercase hyphenated GUID.
+7. `cluster` equals the host entry's cluster, or both are absent. The subject is scoped by the entry alone (6.4), so a disagreeing host is misconfigured.
 8. Mint the issued JWT (6.4).
 
 **Success (HTTP 200)**
@@ -216,11 +216,11 @@ Header: `{"alg":"ES256","typ":"JWT","kid":"<issuer key thumbprint>"}`
 | Claim | Value |
 | --- | --- |
 | `iss` | The issuer URL, exactly as in the discovery document (https, no trailing slash) |
-| `sub` | VM ID, lowercase hyphenated GUID |
+| `sub` | `cluster:<cluster>/<vmid>` if the signing key's allowlist entry has a cluster, otherwise `host:<host>/<vmid>`. The VM ID is the host token's `sub` |
 | `aud` | The requested audience, as a single string |
 | `iat`, `nbf`, `exp` | Now; `exp` = `iat` + 5 minutes by default, 10 minutes at most (proposed) |
 | `jti` | Random 128-bit value |
-| `vm_name`, `host`, `cluster` | Informational and host-asserted. Consumers authorize on `iss` and `sub` only |
+| `vm_name`, `host`, `cluster` | Informational: `vm_name` is host-asserted, `host` and `cluster` come from the allowlist. Consumers authorize on `iss` and `sub` only |
 
 Any VM can request any audience unless an audience allowlist is configured. The audience says who a token is meant for. It does not say the VM may use that service.
 
@@ -266,7 +266,7 @@ A consumer that accepts an issued JWT should do the following, using any standar
 1. Verify the signature against the issuer's JWKS, accepting only ES256 (or RS256 if the issuer is configured for it).
 2. Require `iss` to equal the issuer URL and `aud` to equal the consumer's own audience.
 3. Require `nbf` and `exp` to hold, allowing 2 minutes of clock skew.
-4. Take the identity from `iss` and `sub` only. `vm_name`, `host` and `cluster` are host-asserted and informational.
+4. Take the identity from `iss` and `sub` only, and treat `sub` as an opaque string. `vm_name`, `host` and `cluster` are informational.
 5. Decide for itself what that identity may do. Proof only says who the VM is.
 
 ## 7. Trust and key management
@@ -299,7 +299,8 @@ hosts:
 - An unknown `kid` is rejected. A `retired` key is accepted until `not_after` and then ignored. `not_after` is a `YYYY-MM-DD` date and covers that whole UTC day; it also ends an `active` key. A `retired` key must have one: to stop trusting a key now, remove it.
 - Reload on file change with an atomic swap. A file that fails validation is refused: keep the previous list and alert. Mount the ConfigMap as a directory, not as a subPath mount, because Kubernetes does not update subPath mounts (verify on your cluster version).
 - Removing a key stops new exchanges immediately. Tokens already issued live until they expire, at most 10 minutes. This is allowlist hygiene, not a revocation feature.
-- Cluster scoping is optional: require the host token's `cluster` to match the host's entry. KVP follows a VM through live migration, so list every host in a cluster that may sign for its VMs.
+- A host's `cluster` scopes the subjects of the VMs it signs for (6.4), so give every host in a failover cluster the same `cluster`, and give a standalone host none. KVP follows a VM through live migration, so list every host in a cluster that may sign for its VMs. A VM gets a new subject if it moves to another cluster or standalone host, or if its host's `cluster` changes here.
+- Host and cluster names are 1 to 253 letters, digits, `.`, `-` or `_`, starting with a letter or digit, so subjects parse unambiguously. Other names fail validation.
 
 ### 7.3 Rotation
 
@@ -377,7 +378,7 @@ Fourteen traps to design around. "Verified" means I confirmed it in documentatio
 | 3 | KVP entries persist until deleted and move with the VM during live migration | Overwrite on arrival and on every refresh; allowlist every host in a cluster | Verified (documentation, and a cluster live migration on Windows Server 2025) |
 | 4 | `AddKvpItems` refuses an existing key (32773) and `ModifyKvpItems` refuses a missing one (32779) | Upsert as Modify, then Add on 32779 | Verified (Windows Server 2025) |
 | 5 | `VirtualMachineName` in the guest parameters changes immediately when a VM is renamed | Treat the name as mutable; identity is the VM ID | Verified |
-| 6 | A copied VM may keep the same VM ID, which gives two live VMs one identity | Always generate a new ID on copy or import | Verify |
+| 6 | An import that registers in place or restores keeps the VM ID, so two live VMs on different clusters or standalone hosts can share one. A failover cluster refuses a second VM with an ID it already has | Subjects are scoped by cluster or host (6.4). Still generate a new ID on copy | Verified (Import-VM documentation; refusal within a cluster seen restoring backups while the source existed) |
 | 7 | Any process that can read the External pool can read the token. On Windows the `External` key grants read to Authenticated Users (verified on a Windows Server 2025 guest). On Linux, upstream `hv_kvp_daemon` creates pool files mode 0644 in a 0755 `/var/lib/hyperv`, readable by every account unless its service runs with a narrower umask (from the daemon source; check `ls -l` on a real guest of each distribution) | Treat the host token as readable by any account in the VM; rely on short lifetimes | Partly verified |
 | 8 | Entra and AWS may not accept ES256 from an external issuer | Test each target; fall back to RS256 for issued tokens | Verify (GCP accepts RS256 or ES256: verified) |
 | 9 | Entra must reach the discovery document and JWKS over public HTTPS, and federation guides want `kid` and `use: sig` on keys | Host the two documents as static files; always set both fields | Verified (vendor guides) |
@@ -428,6 +429,7 @@ A checklist to hold the build to. Each item is cheap now and expensive later.
 **Data**
 
 - [ ] No personal data in claims. `vm_name`, `host` and `cluster` are the only extras, and they are marked informational.
+- [ ] Scope `sub` by the allowlist entry, never by the host token's claims.
 
 ## 12. Test plan
 
@@ -455,7 +457,7 @@ Negative tests matter more than positive ones here: a validator that accepts a b
 - Values near the limit: 1023 characters accepted, 1024 refused (done on the host; still check what the Linux and Windows guests read back).
 - Update behavior: add, modify, and add on an existing key (done on the host).
 - Pool file parsing on Linux, registry reads on Windows, and who can read them.
-- Duplicate VM ID behavior after copy and import.
+- Duplicate VM ID behavior after copy and import: the same ID on two clusters, or a cluster and a standalone host, gives two subjects.
 
 **Interoperability**
 
@@ -482,7 +484,7 @@ Twelve items remain open. Some need your decision; the rest are checks to run be
 | 2 | Issuer replicas: with a Kubernetes Deployment, all replicas mount one shared signing Secret, which is the simple path. Confirm it, and decide how key rotation is staged through GitOps | You, before phase 1 |
 | 3 | Whether Entra and AWS accept ES256 from an external issuer; RS256 is the fallback for issued tokens | Phase 2 test |
 | 4 | KVP behavior: host side settled (Add versus Modify, 1023-character values; see 6.2). Read permissions are verified on Windows and taken from the daemon source on Linux (gotcha 7). Still open: what each guest reads back for a real token, and the pool file mode on a real Linux guest | Phase 0 test |
-| 5 | Duplicate VM IDs after copy or import; policy is to always generate a new ID | Phase 0 test |
+| 5 | Settled: duplicate VM IDs across clusters or standalone hosts get distinct subjects (decision 2); a failover cluster refuses duplicates within it | Done |
 | 6 | Settled: the refresher's virtual account needs Hyper-V Administrators membership, and that is enough (tested on Windows Server 2025). Without it the account sees no VMs | Done |
 | 7 | Settled: host keys use the CNG software key storage provider, no TPM (decision 13). `CngKey` creates a non-exportable P-256 machine key there (tested) | Done |
 | 8 | .NET specifics: `JsonWebTokenHandler` settings for `ValidAlgorithms` and lifetime caps, and self-contained single-file size (the refresher is 73.5 MB). NativeAOT is out for the refresher, because `System.Management` needs built-in COM | Phase 0 test |

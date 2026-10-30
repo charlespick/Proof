@@ -123,7 +123,7 @@ public static class TokenEndpoint
         }
 
         var identity = result.Identity!;
-        log.Subject = identity.VmId;
+        log.Subject = identity.Subject;
         log.HostJti = identity.Jti;
 
         var token = minter.Mint(identity, audience!);

@@ -109,6 +109,20 @@ public sealed class AllowlistParserTests
         AssertRefused(TestHost.Allowlist(host.AllowlistEntry(), copy), $"Key '{host.Kid}' is listed more than once");
     }
 
+    [Theory]
+    [InlineData("hv/host-01")]
+    [InlineData("host:hv-01")]
+    [InlineData("-hv-host-01")]
+    [InlineData("hv host 01")]
+    public void RefusesHostNamesASubjectCannotHold(string name) =>
+        AssertRefused(TestHost.Allowlist(host.AllowlistEntry()).Replace("host: hv-host-01", $"host: \"{name}\""), "must be 1 to 253 letters");
+
+    [Theory]
+    [InlineData("prod/east")]
+    [InlineData("cluster:prod")]
+    public void RefusesClusterNamesASubjectCannotHold(string name) =>
+        AssertRefused(TestHost.Allowlist(host.AllowlistEntry(clusterOverride: $"\"{name}\"")), "must be 1 to 253 letters");
+
     [Fact]
     public void RefusesHostWithoutKeys() =>
         AssertRefused("version: 1\nhosts:\n  - host: hv-host-01\n    keys: []\n", "has no keys");

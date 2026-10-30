@@ -8,13 +8,14 @@ using Proof.Shared;
 namespace Proof.Issuer;
 
 /// <summary>Who a verified host token says the VM is.</summary>
-/// <param name="VmId">The VM ID, a lowercase hyphenated GUID. This is the identity.</param>
+/// <param name="Subject">The identity: the VM ID scoped by the signing host's cluster or host, from the allowlist (<see cref="ProofSubjects"/>).</param>
+/// <param name="VmId">The VM ID, a lowercase hyphenated GUID. Unique only within its cluster or host.</param>
 /// <param name="Host">The allowlisted host that signed the token.</param>
 /// <param name="Kid">The host key that signed the token.</param>
 /// <param name="Jti">The host token's <c>jti</c>, for logs.</param>
 /// <param name="VmName">Host-asserted and informational.</param>
-/// <param name="Cluster">Host-asserted and informational unless cluster scoping is on.</param>
-public sealed record HostIdentity(string VmId, string Host, string Kid, string Jti, string? VmName, string? Cluster);
+/// <param name="Cluster">The signing host's cluster on the allowlist, which the host token's <c>cluster</c> matched.</param>
+public sealed record HostIdentity(string Subject, string VmId, string Host, string Kid, string Jti, string? VmName, string? Cluster);
 
 /// <summary>Why a host token was refused. Logged, never returned to the caller.</summary>
 public enum HostTokenFailure
@@ -156,15 +157,15 @@ public sealed class HostTokenValidator(AllowlistMonitor allowlist, IOptions<Issu
             return Fail(HostTokenFailure.InvalidSubject, kid: hostKey.Kid);
         }
 
-        // 7. Cluster scoping.
-        if (options.Value.EnforceClusterScope
-            && (hostKey.Cluster is null || !string.Equals(cluster, hostKey.Cluster, StringComparison.Ordinal)))
+        // 7. The host's cluster, or its absence, as the allowlist records it. The subject is scoped by the allowlist
+        // entry alone; a host token that disagrees with it comes from a misconfigured host.
+        if (!string.Equals(cluster, hostKey.Cluster, StringComparison.Ordinal))
         {
             return Fail(HostTokenFailure.ClusterMismatch, kid: hostKey.Kid);
         }
 
         return new HostTokenResult(
-            new HostIdentity(jwt.Subject, hostKey.Host, hostKey.Kid, jwt.Id, vmName, cluster),
+            new HostIdentity(ProofSubjects.For(hostKey.Host, hostKey.Cluster, jwt.Subject), jwt.Subject, hostKey.Host, hostKey.Kid, jwt.Id, vmName, hostKey.Cluster),
             HostTokenFailure.None,
             Kid: hostKey.Kid);
     }

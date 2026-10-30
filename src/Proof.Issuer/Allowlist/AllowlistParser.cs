@@ -69,6 +69,12 @@ public static class AllowlistParser
                 throw new AllowlistException($"{where}.host is required.");
             }
 
+            // Names go into issued subjects, so they keep to the refresher's rule and never hold a '/' or ':'.
+            if (!ProofNames.IsValid(entry.Host))
+            {
+                throw new AllowlistException($"{where}.host '{entry.Host}' must be 1 to 253 letters, digits, '.', '-' or '_', starting with a letter or digit.");
+            }
+
             if (!hosts.Add(entry.Host))
             {
                 throw new AllowlistException($"Host '{entry.Host}' is listed more than once.");
@@ -77,6 +83,11 @@ public static class AllowlistParser
             if (entry.Cluster is not null && string.IsNullOrWhiteSpace(entry.Cluster))
             {
                 throw new AllowlistException($"{where}.cluster is empty; omit it instead.");
+            }
+
+            if (entry.Cluster is not null && !ProofNames.IsValid(entry.Cluster))
+            {
+                throw new AllowlistException($"{where}.cluster '{entry.Cluster}' must be 1 to 253 letters, digits, '.', '-' or '_', starting with a letter or digit.");
             }
 
             if (entry.Keys is null || entry.Keys.Count == 0)

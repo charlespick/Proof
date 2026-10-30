@@ -83,9 +83,10 @@ The issuer reads its settings from the `Proof` configuration section (environmen
 | `AdditionalPublicKeyPaths` | none | PEM public keys also published in the JWKS, for rotation |
 | `IssuedTokenLifetime` | `00:05:00` | At most `00:10:00` |
 | `AllowedAudiences` | none (any) | If set, other audiences get `invalid_target` |
-| `EnforceClusterScope` | `false` | Require a host token's `cluster` to match its host's allowlist entry |
 | `TokenRequestsPerMinute` | `60` | Rate limit per source address on `/token` |
 | `TrustedProxies` | none | Addresses or CIDR networks of the ingress. Only these may set the source address with `X-Forwarded-For` |
+
+Issued JWTs name the VM as `sub` = `cluster:<cluster>/<vmid>`, or `host:<host>/<vmid>` for a host whose allowlist entry has no `cluster`. Hyper-V keeps VM IDs unique within a failover cluster or a standalone host, but an import or a restore elsewhere keeps the ID, so the VM ID alone is not an identity. The scope comes from the allowlist entry of the key that signed the host token, never from the token's claims, and a host token whose `cluster` differs from that entry (or has one when the entry has none) is refused. A VM keeps its subject when it live-migrates within its cluster; it gets a new one if it moves to another cluster or standalone host, or if its host joins or leaves a cluster on the allowlist. Host and cluster names are 1 to 253 letters, digits, `.`, `-` or `_`, starting with a letter or digit, so a subject parses unambiguously.
 
 Endpoints: `POST /token`, `GET /.well-known/openid-configuration`, `GET /.well-known/jwks.json`, `GET /healthz/live`, and `GET /healthz/ready` (ready once an allowlist has loaded).
 
@@ -221,7 +222,7 @@ Where the client reads KVP:
 - **Linux**: `/var/lib/hyperv/.kvp_pool_0`, the External pool file `hv_kvp_daemon` keeps (512-byte key and 2048-byte value records). Reads take an fcntl read lock, so they never see the daemon halfway through a rewrite. Upstream, the daemon creates the file mode 0644, so any account can run `proof`, unless the distribution's service sets a narrower umask (not yet checked on a real guest). Guest parameters come from `.kvp_pool_3`. `proof status` reports a missing daemon (`hv_kvp_daemon` or `hypervkvpd`).
 - **Windows**: `HKLM\SOFTWARE\Microsoft\Virtual Machine\External`, and guest parameters from `...\Guest\Parameters`. This needs the Data Exchange integration service enabled for the VM. The key grants read to Authenticated Users, so any account can run `proof`, and so any account can read the host token (Design.md gotcha 7).
 
-`VirtualMachineId`, `VirtualMachineName` and `PhysicalHostName` from the guest parameters appear in `status` and in messages. They are not trusted. `status` warns if `VirtualMachineId` differs from the token's `sub`, which a copied VM can show until its host writes its own token.
+`VirtualMachineId`, `VirtualMachineName` and `PhysicalHostName` from the guest parameters appear in `status` and in messages. They are not trusted. `status` warns if `VirtualMachineId` differs from the host token's `sub` (the bare VM ID), which a copied VM can show until its host writes its own token.
 
 To keep a token file fresh, run `proof token --out` on a timer well inside the issued lifetime (5 minutes by default). For example, with systemd:
 

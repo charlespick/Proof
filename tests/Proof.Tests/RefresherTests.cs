@@ -29,7 +29,7 @@ public sealed class RefresherTests : IDisposable
     {
         signer = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01", Cluster = "prod" });
         refresher = new TokenRefresher(hyperV, signer, time, services.GetRequiredService<IMeterFactory>(), NullLogger<TokenRefresher>.Instance);
-        issuer = new ValidatorHarness(AllowlistFor(signer, "hv-host-01", "prod"), enforceClusterScope: true);
+        issuer = new ValidatorHarness(AllowlistFor(signer, "hv-host-01", "prod"));
     }
 
     public void Dispose()
@@ -61,6 +61,7 @@ public sealed class RefresherTests : IDisposable
 
         Assert.True(result.IsValid, result.Failure.ToString());
         Assert.Equal(TestHost.VmId, result.Identity!.VmId);
+        Assert.Equal("cluster:prod/" + TestHost.VmId, result.Identity.Subject);
         Assert.Equal("hv-host-01", result.Identity.Host);
         Assert.Equal("web01", result.Identity.VmName);
         Assert.Equal("prod", result.Identity.Cluster);
@@ -146,6 +147,16 @@ public sealed class RefresherTests : IDisposable
     }
 
     [Fact]
+    public async Task HostConfiguredForAnotherClusterIsRefused()
+    {
+        // The refresher's Proof:Cluster must match its allowlist entry, which alone scopes the subject.
+        var misconfigured = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01", Cluster = "lab" });
+        using var harness = new ValidatorHarness(AllowlistFor(misconfigured, "hv-host-01", "prod"));
+
+        Assert.Equal(HostTokenFailure.ClusterMismatch, (await harness.ValidateAsync(misconfigured.Sign(Web01, DateTimeOffset.UtcNow).Token)).Failure);
+    }
+
+    [Fact]
     public async Task StandaloneHostOmitsCluster()
     {
         var standalone = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01" });
@@ -154,7 +165,9 @@ public sealed class RefresherTests : IDisposable
         var token = standalone.Sign(Web01, DateTimeOffset.UtcNow).Token;
 
         Assert.False(new JsonWebToken(token).TryGetClaim(ProofClaimNames.Cluster, out _));
-        Assert.True((await harness.ValidateAsync(token)).IsValid);
+        var result = await harness.ValidateAsync(token);
+        Assert.True(result.IsValid, result.Failure.ToString());
+        Assert.Equal("host:hv-host-01/" + TestHost.VmId, result.Identity!.Subject);
     }
 
     // Refresh loop.

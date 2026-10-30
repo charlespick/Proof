@@ -235,7 +235,8 @@ public sealed class ClientCommands(IKvpReader kvp, TimeProvider time, TextWriter
         {
             stderr.WriteLine(
                 $"The host token looks right from inside the VM. The issuer may not have host {Display.Name(info!.Host)} "
-                + $"(key {Display.Name(info.Kid)}) on its allowlist, or its clock may differ from the host's. Its log has the reason.");
+                + $"(key {Display.Name(info.Kid)}) on its allowlist, the host's cluster ({Display.Name(info.Cluster)}) may differ from its allowlist entry, "
+                + "or its clock may differ from the host's. Its log has the reason.");
         }
     }
 

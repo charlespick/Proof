@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Proof.Shared;
@@ -78,6 +79,33 @@ public static class ProofIssuerUrl
         && string.IsNullOrEmpty(url.Query)
         && string.IsNullOrEmpty(url.Fragment)
         && string.IsNullOrEmpty(url.UserInfo);
+}
+
+/// <summary>
+/// Host and cluster names, as the refresher is configured and the allowlist lists them: letters, digits, dot, hyphen
+/// and underscore, so they paste into YAML as they are and never contain the <c>/</c> or <c>:</c> of a subject.
+/// </summary>
+public static partial class ProofNames
+{
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")]
+    private static partial Regex Pattern();
+
+    public static bool IsValid([NotNullWhen(true)] string? name) => name is not null && Pattern().IsMatch(name);
+}
+
+/// <summary>
+/// The <c>sub</c> of issued JWTs. Hyper-V keeps VM IDs unique within a failover cluster, or within a standalone host,
+/// but not across them: an import or a restore keeps the ID it had. So the VM ID is scoped by the cluster, or by the
+/// host when it is in no cluster, as the issuer's allowlist records it. The host token's own claims never choose it.
+/// </summary>
+public static class ProofSubjects
+{
+    public const string ClusterPrefix = "cluster:";
+    public const string HostPrefix = "host:";
+
+    /// <summary><c>cluster:&lt;cluster&gt;/&lt;vmid&gt;</c>, or <c>host:&lt;host&gt;/&lt;vmid&gt;</c> for a host in no cluster.</summary>
+    public static string For(string host, string? cluster, string vmId) =>
+        cluster is not null ? $"{ClusterPrefix}{cluster}/{vmId}" : $"{HostPrefix}{host}/{vmId}";
 }
 
 public static class ProofTokenIds

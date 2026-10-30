@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Proof.Shared;
 
@@ -29,12 +28,8 @@ public sealed class RefresherOptions
     public TimeSpan ScanInterval { get; set; } = HostTokenPolicy.RefreshInterval;
 }
 
-public sealed partial class RefresherOptionsValidator : IValidateOptions<RefresherOptions>
+public sealed class RefresherOptionsValidator : IValidateOptions<RefresherOptions>
 {
-    /// <summary>Host and cluster names: letters, digits, dot, hyphen and underscore, so they paste into YAML as they are.</summary>
-    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")]
-    public static partial Regex NamePattern();
-
     public ValidateOptionsResult Validate(string? name, RefresherOptions options)
     {
         var errors = new List<string>();
@@ -44,12 +39,12 @@ public sealed partial class RefresherOptionsValidator : IValidateOptions<Refresh
             errors.Add("Proof:IssuerUrl must be an absolute https URL with no trailing slash, query or fragment, matching the issuer's.");
         }
 
-        if (!NamePattern().IsMatch(options.HostId))
+        if (!ProofNames.IsValid(options.HostId))
         {
             errors.Add("Proof:HostId must be 1 to 253 letters, digits, '.', '-' or '_', starting with a letter or digit.");
         }
 
-        if (options.Cluster is not null && !NamePattern().IsMatch(options.Cluster))
+        if (options.Cluster is not null && !ProofNames.IsValid(options.Cluster))
         {
             errors.Add("Proof:Cluster must be 1 to 253 letters, digits, '.', '-' or '_', starting with a letter or digit; omit it for a standalone host.");
         }

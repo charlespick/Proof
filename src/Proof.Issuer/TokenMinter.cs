@@ -17,7 +17,7 @@ public sealed class TokenMinter(SigningKeys keys, IOptions<IssuerOptions> option
         var now = time.GetUtcNow();
         var claims = new Dictionary<string, object>
         {
-            [JwtRegisteredClaimNames.Sub] = identity.VmId,
+            [JwtRegisteredClaimNames.Sub] = identity.Subject,
             [JwtRegisteredClaimNames.Jti] = ProofTokenIds.NewJti(),
             [ProofClaimNames.Host] = identity.Host,
         };

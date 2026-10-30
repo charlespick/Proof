@@ -75,7 +75,7 @@ public sealed class IssuerEndpointTests : IDisposable
         Assert.Equal("JWT", jwt.Typ);
         Assert.Equal(ProofKeys.CreatePublicJwk(app.SigningKey).Kid, jwt.Kid);
         Assert.Equal(TestHost.IssuerUrl, jwt.Issuer);
-        Assert.Equal(TestHost.VmId, jwt.Subject);
+        Assert.Equal("cluster:prod/" + TestHost.VmId, jwt.Subject);
         Assert.Equal("my-service", jwt.GetPayloadValue<string>("aud"));
         Assert.Equal(host.HostId, jwt.GetPayloadValue<string>("host"));
         Assert.Equal("web01", jwt.GetPayloadValue<string>("vm_name"));
@@ -83,6 +83,20 @@ public sealed class IssuerEndpointTests : IDisposable
         Assert.Equal(32, jwt.Id.Length);
         Assert.Equal(TimeSpan.FromMinutes(5), jwt.ValidTo - jwt.IssuedAt);
         Assert.Equal(jwt.IssuedAt, jwt.ValidFrom);
+    }
+
+    [Fact]
+    public async Task ScopesTheSubjectByHostForAHostInNoCluster()
+    {
+        var standalone = new TestHost("hv-lab-07", cluster: null);
+        using var standaloneApp = new IssuerApp(TestHost.Allowlist(standalone.AllowlistEntry()));
+        using var standaloneClient = standaloneApp.CreateClient();
+        var response = await standaloneClient.PostAsync(
+            TokenEndpoint.Path, new FormUrlEncodedContent(ExchangeForm(standalone.CreateToken())), TestContext.Current.CancellationToken);
+
+        var jwt = new JsonWebToken((await ReadJsonAsync(response)).GetProperty("access_token").GetString());
+        Assert.Equal("host:hv-lab-07/" + TestHost.VmId, jwt.Subject);
+        Assert.False(jwt.TryGetClaim("cluster", out _));
     }
 
     [Fact]

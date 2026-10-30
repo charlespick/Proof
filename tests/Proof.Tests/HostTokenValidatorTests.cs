@@ -37,6 +37,7 @@ public sealed class HostTokenValidatorTests : IDisposable
 
         Assert.True(result.IsValid, result.Failure.ToString());
         var identity = result.Identity!;
+        Assert.Equal("cluster:prod/" + TestHost.VmId, identity.Subject);
         Assert.Equal(TestHost.VmId, identity.VmId);
         Assert.Equal(host.HostId, identity.Host);
         Assert.Equal(host.Kid, identity.Kid);
@@ -47,13 +48,15 @@ public sealed class HostTokenValidatorTests : IDisposable
     [Fact]
     public async Task AcceptsTokenWithoutOptionalClaims()
     {
-        var token = host.CreateToken(c =>
-        {
-            c.Remove(ProofClaimNames.VmName);
-            c.Remove(ProofClaimNames.Cluster);
-        });
+        var standalone = new TestHost(cluster: null);
+        using var unclustered = new ValidatorHarness(TestHost.Allowlist(standalone.AllowlistEntry()));
+        var token = standalone.CreateToken(c => c.Remove(ProofClaimNames.VmName));
 
-        Assert.True((await harness.ValidateAsync(token)).IsValid);
+        var result = await unclustered.ValidateAsync(token);
+        Assert.True(result.IsValid, result.Failure.ToString());
+        Assert.Equal("host:hv-host-01/" + TestHost.VmId, result.Identity!.Subject);
+        Assert.Null(result.Identity.Cluster);
+        Assert.Null(result.Identity.VmName);
     }
 
     // Lifetime and clock skew.
@@ -303,21 +306,13 @@ public sealed class HostTokenValidatorTests : IDisposable
         Assert.Equal(HostTokenFailure.AllowlistNotLoaded, result.Failure);
     }
 
-    // Cluster scoping.
-
-    [Fact]
-    public async Task ClusterScopeAcceptsMatchingCluster()
-    {
-        using var scoped = new ValidatorHarness(TestHost.Allowlist(host.AllowlistEntry()), enforceClusterScope: true);
-        Assert.True((await scoped.ValidateAsync(host.CreateToken())).IsValid);
-    }
+    // Cluster scoping. The allowlist entry alone scopes the subject; a host token must agree with it.
 
     [Theory]
     [InlineData("test")]
     [InlineData(null)]
-    public async Task ClusterScopeRefusesOtherOrMissingCluster(string? cluster)
+    public async Task RefusesAClusterOtherThanTheAllowlistEntrys(string? cluster)
     {
-        using var scoped = new ValidatorHarness(TestHost.Allowlist(host.AllowlistEntry()), enforceClusterScope: true);
         var token = host.CreateToken(c =>
         {
             if (cluster is null)
@@ -330,14 +325,49 @@ public sealed class HostTokenValidatorTests : IDisposable
             }
         });
 
-        Assert.Equal(HostTokenFailure.ClusterMismatch, (await scoped.ValidateAsync(token)).Failure);
+        await AssertRefused(token, HostTokenFailure.ClusterMismatch);
     }
 
     [Fact]
-    public async Task ClusterScopeRefusesHostWithoutCluster()
+    public async Task RefusesAClusterFromAHostInNoCluster()
     {
-        var unscoped = new TestHost(cluster: null);
-        using var scoped = new ValidatorHarness(TestHost.Allowlist(unscoped.AllowlistEntry()), enforceClusterScope: true);
-        Assert.Equal(HostTokenFailure.ClusterMismatch, (await scoped.ValidateAsync(unscoped.CreateToken())).Failure);
+        var standalone = new TestHost(cluster: null);
+        using var unclustered = new ValidatorHarness(TestHost.Allowlist(standalone.AllowlistEntry()));
+        var token = standalone.CreateToken(c => c[ProofClaimNames.Cluster] = "prod");
+        Assert.Equal(HostTokenFailure.ClusterMismatch, (await unclustered.ValidateAsync(token)).Failure);
+    }
+
+    [Fact]
+    public async Task GivesTheSameVmIdOnDifferentScopesDifferentSubjects()
+    {
+        // An imported or restored VM keeps its ID, so two scopes can each run a VM with this one.
+        var prod = new TestHost("hv-host-01", "prod");
+        var lab = new TestHost("hv-host-02", "lab");
+        var standalone = new TestHost("hv-host-03", cluster: null);
+        using var all = new ValidatorHarness(TestHost.Allowlist(prod.AllowlistEntry(), lab.AllowlistEntry(), standalone.AllowlistEntry()));
+
+        var subjects = new List<string>();
+        foreach (var h in new[] { prod, lab, standalone })
+        {
+            var result = await all.ValidateAsync(h.CreateToken());
+            Assert.True(result.IsValid, result.Failure.ToString());
+            Assert.Equal(TestHost.VmId, result.Identity!.VmId);
+            subjects.Add(result.Identity.Subject);
+        }
+
+        Assert.Equal(["cluster:prod/" + TestHost.VmId, "cluster:lab/" + TestHost.VmId, "host:hv-host-03/" + TestHost.VmId], subjects);
+    }
+
+    [Fact]
+    public async Task GivesEveryHostInAClusterTheSameSubject()
+    {
+        // Live migration moves a VM between hosts of one cluster; its identity must not change.
+        var first = new TestHost("hv-host-01", "prod");
+        var second = new TestHost("hv-host-02", "prod");
+        using var cluster = new ValidatorHarness(TestHost.Allowlist(first.AllowlistEntry(), second.AllowlistEntry()));
+
+        Assert.Equal(
+            (await cluster.ValidateAsync(first.CreateToken())).Identity!.Subject,
+            (await cluster.ValidateAsync(second.CreateToken())).Identity!.Subject);
     }
 }

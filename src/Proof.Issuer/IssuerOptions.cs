@@ -38,9 +38,6 @@ public sealed class IssuerOptions
     /// <summary>If non-empty, only these audiences may be requested. Empty means any audience.</summary>
     public List<string> AllowedAudiences { get; set; } = [];
 
-    /// <summary>If true, a host token's <c>cluster</c> must equal the cluster on its host's allowlist entry.</summary>
-    public bool EnforceClusterScope { get; set; }
-
     /// <summary><c>/token</c> requests allowed per source address per minute.</summary>
     public int TokenRequestsPerMinute { get; set; } = 60;
 
