@@ -110,6 +110,32 @@ jobs:
             -RefresherMsi "dist/proof-refresher-$env:ProofVersion-x64.msi" `
             -ClientMsi "dist/proof-$env:ProofVersion-x64.msi" `
             -ExpectedVersion "$env:ProofVersion+$env:ProofCommit"
+      # The MSI logs are in the script's temp folder and the service says why it stopped in the event logs; a file
+      # rollback could not delete is left in PendingFileRenameOperations.
+      - name: Collect installer logs
+        if: failure()
+        shell: pwsh
+        run: |
+          $out = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/installer-logs"
+          Get-ChildItem ([System.IO.Path]::GetTempPath()) -Directory -Filter 'proof-installer-test-*' |
+            Copy-Item -Recurse -Destination $out
+          wevtutil epl Application "$out/Application.evtx"
+          wevtutil epl System "$out/System.evtx"
+          & {
+            'PendingFileRenameOperations:'
+            (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction SilentlyContinue).PendingFileRenameOperations
+            ''
+            'proof-refresher processes:'
+            Get-Process proof-refresher -ErrorAction SilentlyContinue | Format-Table Id, StartTime, Path -AutoSize
+            ''
+            "$env:ProgramFiles\Proof:"
+            Get-ChildItem "$env:ProgramFiles\Proof" -ErrorAction SilentlyContinue | Format-Table Name, Length, LastWriteTime -AutoSize
+          } *>&1 | Out-String -Width 200 | Set-Content "$out/state.txt"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-installer-logs
+          path: ${{ runner.temp }}/installer-logs
       - uses: actions/upload-artifact@v4
         with:
           name: windows
