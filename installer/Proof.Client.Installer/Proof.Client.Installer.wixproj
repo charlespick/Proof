@@ -2,7 +2,13 @@
 
   <PropertyGroup>
     <OutputName>proof</OutputName>
-    <PayloadProject>$(MSBuildThisFileDirectory)..\..\src\Proof.Client\Proof.Client.csproj</PayloadProject>  </PropertyGroup>
+    <PayloadProject>$(MSBuildThisFileDirectory)..\..\src\Proof.Client\Proof.Client.csproj</PayloadProject>
+    <SecondPayloadProject>$(MSBuildThisFileDirectory)..\..\src\Proof.Metadata\Proof.Metadata.csproj</SecondPayloadProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\License.wxs" />

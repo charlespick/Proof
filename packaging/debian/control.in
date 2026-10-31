@@ -3,7 +3,7 @@ Version: @VERSION@
 Architecture: @ARCH@
 Maintainer: Charles Pickering <me@charlespick.xyz>
 Installed-Size: @INSTALLED_SIZE@
-Depends: libc6, libgcc-s1 | libgcc1, libstdc++6, libssl3t64 | libssl3 | libssl1.1, ca-certificates
+Depends: libc6, libgcc-s1 | libgcc1, libstdc++6, libssl3t64 | libssl3 | libssl1.1, ca-certificates, init-system-helpers
 Recommends: hyperv-daemons | linux-cloud-tools-virtual
 Section: admin
 Priority: optional
@@ -15,3 +15,7 @@ Description: Hyper-V VM identity client
  .
  It reads the KVP pool that hv_kvp_daemon keeps, and its settings from
  /etc/proof/config.json, which the image provides.
+ .
+ proof-metadata is a service on 127.0.0.1:8169 that serves the EC2-style
+ instance metadata API to cloud-init from the Hyper-V host and the VM's Hyper-V
+ notes. It needs the hv_sock kernel module.

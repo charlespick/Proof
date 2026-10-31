@@ -3,7 +3,7 @@
 #
 #   packaging/debian/build-deb.sh <publish dir> <deb version> <deb arch> <output dir>
 #
-# The publish dir holds the self-contained single-file proof (see README.md). The deb version is ProofDebVersion
+# The publish dir holds the self-contained single files proof and proof-metadata (see README.md). The deb version is ProofDebVersion
 # from build/Version.proj, where a prerelease's - is already ~ so it sorts below its release.
 set -euo pipefail
 
@@ -23,11 +23,15 @@ trap 'rm -rf "$root"' EXIT
 
 # Debian packages install to /usr/bin, never /usr/local.
 install -Dm0755 "$publish/proof" "$root/usr/bin/proof"
+install -Dm0755 "$publish/proof-metadata" "$root/usr/bin/proof-metadata"
+install -Dm0644 "$here/proof-metadata.service" "$root/usr/lib/systemd/system/proof-metadata.service"
+install -Dm0644 "$here/proof-metadata.modules" "$root/usr/lib/modules-load.d/proof-metadata.conf"
 install -Dm0644 "$here/copyright" "$root/usr/share/doc/proof/copyright"
 # The image supplies config.json, so the package owns only the directory.
 install -d -m0755 "$root/etc/proof"
 
 install -d -m0755 "$root/DEBIAN"
+install -m0755 "$here/postinst" "$here/prerm" "$here/postrm" "$root/DEBIAN/"
 installed_size=$(du -sk --exclude=DEBIAN "$root" | cut -f1)
 sed -e "s/@VERSION@/$version/" -e "s/@ARCH@/$arch/" -e "s/@INSTALLED_SIZE@/$installed_size/" \
   "$here/control.in" > "$root/DEBIAN/control"

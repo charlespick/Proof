@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+  # Loaded at boot from modules-load.d; this is for the boot we are in. Absent outside a Hyper-V kernel.
+  modprobe hv_sock 2>/dev/null || true
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    deb-systemd-helper enable proof-metadata.service
+    deb-systemd-invoke restart proof-metadata.service
+  else
+    deb-systemd-helper enable proof-metadata.service
+  fi
+fi

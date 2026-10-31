@@ -10,3 +10,4 @@ packaging/
 tests/
 src/Proof.Client/
 src/Proof.Refresher/
+src/Proof.Metadata/

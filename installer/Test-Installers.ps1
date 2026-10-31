@@ -95,6 +95,7 @@ try {
     $startName = (Get-CimInstance Win32_Service -Filter "Name='proof-refresher'").StartName
     Check ($startName -eq 'NT SERVICE\proof-refresher') "...as NT SERVICE\proof-refresher (got $startName)"
     Check (Test-InHyperVAdministrators) '...which is in Hyper-V Administrators'
+    Check (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\50524f46-facb-11e6-bd58-64006a7986d3') '...and the instance metadata socket is registered with Hyper-V'
     $access = & "$installDir\proof-refresher.exe" key show 2>&1 | Out-String
     Check ($access -match 'NT SERVICE\\proof-refresher: read') '...and may use the host key'
 
@@ -120,15 +121,29 @@ try {
     if ($ExpectedVersion) {
         $v = & "$installDir\proof.exe" --version
         Check ($v -eq $ExpectedVersion) "proof --version prints $ExpectedVersion (got $v)"
+        $v = & "$installDir\proof-metadata.exe" --version
+        Check ($v -eq $ExpectedVersion) "proof-metadata --version prints $ExpectedVersion (got $v)"
     }
+
+    $metadata = Get-CimInstance Win32_Service -Filter "Name='proof-metadata'"
+    Check ($metadata.State -eq 'Running') '...and the proof-metadata service is running'
+    Check ($metadata.StartMode -eq 'Auto') '...and starts automatically'
+    Check ($metadata.StartName -eq 'NT AUTHORITY\LocalService') "...as Local Service (got $($metadata.StartName))"
+    Check ((Invoke-WebRequest 'http://127.0.0.1:8169/' -UseBasicParsing).Content -match '(?m)^latest$') '...and answers on 127.0.0.1:8169'
+    # This machine is not a guest of a Proof host, so the API says it cannot reach one.
+    Check ((Invoke-WebRequest 'http://127.0.0.1:8169/latest/meta-data/' -UseBasicParsing -SkipHttpErrorCheck).StatusCode -eq 503) '...and says 503 with no host to ask'
+    $listening = @((Get-NetTCPConnection -State Listen -LocalPort 8169).LocalAddress)
+    Check (($listening.Count -eq 1) -and ($listening[0] -eq '127.0.0.1')) "...and listens on loopback only (got $listening)"
 
     Check ((Invoke-Msi '/x' $RefresherMsi 'refresher-uninstall') -eq 0) 'the refresher MSI uninstalls'
     Check (-not (Test-ServiceInstalled)) '...and removes the service'
+    Check (-not (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\50524f46-facb-11e6-bd58-64006a7986d3')) '...and unregisters the instance metadata socket'
     Check (-not (Test-InHyperVAdministrators)) '...and takes the account out of Hyper-V Administrators'
     Check (Test-Path "$installDir\LICENSE.txt") '...and leaves the license the client still uses'
     Check ([System.Security.Cryptography.CngKey]::Exists($keyName, $ksp, $machineKey)) '...and leaves the host key'
 
     Check ((Invoke-Msi '/x' $ClientMsi 'client-uninstall') -eq 0) 'the client MSI uninstalls'
+    Check (-not (Get-Service proof-metadata -ErrorAction SilentlyContinue)) '...and removes the proof-metadata service'
     Check (-not (Test-Path $installDir)) "...and removes $installDir"
     Check (-not (Test-OnMachinePath)) '...and takes it off the machine PATH'
 }

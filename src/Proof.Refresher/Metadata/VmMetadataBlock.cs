@@ -1,0 +1,424 @@
+using System.Text;
+using System.Text.Json;
+using Proof.Shared;
+using YamlDotNet.Core;
+using YamlDotNet.RepresentationModel;
+
+namespace Proof.Refresher.Metadata;
+
+/// <summary>A metadata block that cannot be used. The message is for the host's log and never quotes a value.</summary>
+public sealed class VmMetadataException(string message) : Exception(message);
+
+/// <summary>
+/// A VM's instance metadata: YAML in its Hyper-V notes between two marker lines (Design.md 16.2). Everything
+/// outside the markers belongs to the operator and is never read, served or changed.
+/// </summary>
+public sealed class VmMetadataBlock
+{
+    public const string BeginMarker = "#proof-metadata-begin";
+    public const string EndMarker = "#proof-metadata-end";
+
+    /// <summary>A value that is served until provisioning finishes, then replaced in the notes.</summary>
+    public const string SensitiveTag = "!sensitive";
+
+    /// <summary>What a sensitive value becomes: this tag and the time it was cleared. Never served.</summary>
+    public const string ClearedTag = "!cleared";
+
+    private const string MetaDataKey = "meta-data";
+    private const string UserDataKey = "user-data";
+    private const string ProvisioningKey = "provisioning";
+    private const string StatusKey = "status";
+    private const string InstanceIdKey = "instance-id";
+    private const string HostnameKey = "local-hostname";
+    private const int MaxDepth = 16;
+
+    private readonly string notes;
+    private readonly int blockStart;
+    private readonly int blockEnd;
+    private readonly string yaml;
+    private readonly YamlMappingNode root;
+
+    private VmMetadataBlock(string notes, int blockStart, int blockEnd)
+    {
+        this.notes = notes;
+        this.blockStart = blockStart;
+        this.blockEnd = blockEnd;
+        yaml = notes[blockStart..blockEnd];
+        root = Load(yaml);
+        Validate();
+        Provisioning = ReadProvisioning(root);
+    }
+
+    /// <summary>One of <see cref="ProvisioningStatus"/>. A block that does not say is pending.</summary>
+    public string Provisioning { get; }
+
+    /// <summary>How many values are marked sensitive and have not been cleared.</summary>
+    public int SensitiveCount => Scalars(root).Count(IsSensitive);
+
+    /// <summary>The block in <paramref name="notes"/>, or null if there is none.</summary>
+    /// <exception cref="VmMetadataException">The markers or the YAML between them are wrong.</exception>
+    public static VmMetadataBlock? Find(string? notes)
+    {
+        if (string.IsNullOrEmpty(notes))
+        {
+            return null;
+        }
+
+        int? start = null, end = null;
+        var position = 0;
+        while (position < notes.Length)
+        {
+            // Hyper-V Manager writes CRLF; other tools may write LF. A marker must start its line, which also keeps
+            // one inside a block scalar from counting, since a top-level block scalar is indented.
+            var newline = notes.IndexOf('\n', position);
+            var next = newline < 0 ? notes.Length : newline + 1;
+            var line = notes[position..(newline < 0 ? notes.Length : newline)].TrimEnd();
+            if (line == BeginMarker)
+            {
+                if (start is not null)
+                {
+                    throw new VmMetadataException($"The notes have more than one {BeginMarker} line.");
+                }
+
+                start = next;
+            }
+            else if (line == EndMarker)
+            {
+                if (start is null || end is not null)
+                {
+                    throw new VmMetadataException($"{EndMarker} must follow {BeginMarker}, once.");
+                }
+
+                end = position;
+            }
+
+            position = next;
+        }
+
+        return (start, end) switch
+        {
+            (null, null) => null,
+            (not null, not null) => new VmMetadataBlock(notes, start.Value, end.Value),
+            _ => throw new VmMetadataException($"The notes have {BeginMarker} with no {EndMarker} after it."),
+        };
+    }
+
+    /// <summary>What a VM whose notes have no block is served: what Hyper-V knows about it, and nothing from the notes.</summary>
+    public static MetadataResponse BasicResponse(string instanceId, string? defaultHostname) =>
+        new VmMetadataBlock("", 0, 0).ToResponse(instanceId, defaultHostname) with { Provisioning = ProvisioningStatus.None };
+
+    /// <summary>
+    /// The notes of a VM with no block after it reports provisioning finished: the same notes with the least block
+    /// that records it added after them, so the host keeps a record of a VM it was not told about.
+    /// </summary>
+    /// <exception cref="VmMetadataException">The result would not read back as a block. Nothing should be written.</exception>
+    public static string AppendFinished(string? notes, string result, string instanceId, DateTimeOffset now)
+    {
+        notes ??= "";
+        // Hyper-V Manager writes CRLF, so that is also what empty notes get.
+        var newline = notes.Contains('\n') && !notes.Contains("\r\n", StringComparison.Ordinal) ? "\n" : "\r\n";
+        var separator = notes.Length == 0 || notes.EndsWith('\n') ? "" : newline;
+        var finished = $"{notes}{separator}{BeginMarker}{newline}{ProvisioningKey}: {Recorded(result, instanceId, Timestamp(now))}{newline}{EndMarker}{newline}";
+        return Find(finished)?.Provisioning == result
+            ? finished
+            : throw new VmMetadataException("Recording the status did not leave the expected YAML, so the notes were not changed.");
+    }
+
+    /// <summary>
+    /// The response to a guest's read. A sensitive value is served only while provisioning is pending: one an operator
+    /// adds to a finished VM stays unserved until they set the status back to pending.
+    /// </summary>
+    public MetadataResponse ToResponse(string instanceId, string? defaultHostname)
+    {
+        var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            var hasHostname = false;
+            if (Child(root, MetaDataKey) is YamlMappingNode metaData)
+            {
+                foreach (var (key, value) in metaData.Children.Where(c => IsServed(c.Value)))
+                {
+                    var name = ((YamlScalarNode)key).Value!;
+                    hasHostname |= name == HostnameKey;
+                    writer.WritePropertyName(name);
+                    WriteJson(writer, value);
+                }
+            }
+
+            if (!hasHostname && defaultHostname is not null)
+            {
+                writer.WriteString(HostnameKey, defaultHostname);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        using var document = JsonDocument.Parse(buffer.ToArray());
+        return new MetadataResponse(
+            MetadataResponseStatus.Ok,
+            instanceId,
+            Provisioning,
+            document.RootElement.Clone(),
+            Child(root, UserDataKey) is YamlScalarNode userData && IsServed(userData) ? userData.Value : null);
+    }
+
+    /// <summary>
+    /// The notes after provisioning finishes: each sensitive value is replaced, and the status recorded unless the VM
+    /// had already finished, in which case the first result stands. Only those spans change, so the operator's
+    /// comments and layout survive. The result is parsed again to prove nothing sensitive is left.
+    /// </summary>
+    /// <exception cref="VmMetadataException">The edit did not come out as it should. Nothing should be written.</exception>
+    public string Finish(string result, string instanceId, DateTimeOffset now)
+    {
+        var at = Timestamp(now);
+        var edits = Scalars(root).Where(IsSensitive).Select(s => Span(s, $"{ClearedTag} \"{at}\"")).ToList();
+
+        var status = Provisioning == ProvisioningStatus.Pending ? result : Provisioning;
+        if (Provisioning == ProvisioningStatus.Pending)
+        {
+            var recorded = Recorded(result, instanceId, at);
+            if (Child(root, ProvisioningKey) is { } existing)
+            {
+                edits.Add(Span(existing, recorded));
+            }
+            else
+            {
+                var newline = notes.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+                edits.Add((yaml.Length, yaml.Length, $"{ProvisioningKey}: {recorded}{newline}"));
+            }
+        }
+
+        var text = new StringBuilder(yaml);
+        foreach (var (start, end, replacement) in edits.OrderByDescending(e => e.Start))
+        {
+            text.Remove(start, end - start).Insert(start, replacement);
+        }
+
+        var finished = notes[..blockStart] + text + notes[blockEnd..];
+        VmMetadataBlock? check;
+        try
+        {
+            check = Find(finished);
+        }
+        catch (VmMetadataException)
+        {
+            check = null;
+        }
+
+        if (check is null || check.SensitiveCount != 0 || check.Provisioning != status)
+        {
+            throw new VmMetadataException("Clearing the sensitive values did not leave the expected YAML, so the notes were not changed.");
+        }
+
+        return finished;
+    }
+
+    private static string Timestamp(DateTimeOffset now) => now.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+    private static string Recorded(string result, string instanceId, string at) =>
+        $"{{ {StatusKey}: {result}, at: \"{at}\", {InstanceIdKey}: {instanceId} }}";
+
+    /// <summary>
+    /// The text span of a node, without trailing whitespace: a block scalar's end mark can lie past its line break,
+    /// on the next key, and that break must stay.
+    /// </summary>
+    private (int Start, int End, string Text) Span(YamlNode node, string replacement)
+    {
+        var start = checked((int)node.Start.Index);
+        var end = node is YamlMappingNode mapping ? MappingEnd(mapping) : checked((int)node.End.Index);
+        while (end > start && char.IsWhiteSpace(yaml[end - 1]))
+        {
+            end--;
+        }
+
+        return (start, end, replacement);
+    }
+
+    /// <summary>
+    /// Where a mapping ends. Its own end mark is where its first event ends, not the mapping. A comment holding a
+    /// <c>}</c> could mislead this; <see cref="Finish"/> then finds the result wrong and writes nothing.
+    /// </summary>
+    private int MappingEnd(YamlMappingNode mapping)
+    {
+        var last = Scalars(mapping).Select(s => checked((int)s.End.Index)).DefaultIfEmpty(checked((int)mapping.Start.Index)).Max();
+        return mapping.Style == YamlDotNet.Core.Events.MappingStyle.Flow ? yaml.IndexOf('}', last) + 1 : last;
+    }
+
+    private static YamlMappingNode Load(string yaml)
+    {
+        var stream = new YamlStream();
+        try
+        {
+            stream.Load(new StringReader(yaml));
+        }
+        catch (YamlException ex)
+        {
+            // Only the place: the parser's message can quote the line, which may hold a sensitive value.
+            throw new VmMetadataException($"The YAML is not valid, near line {ex.Start.Line} of the block.");
+        }
+
+        return stream.Documents.Count switch
+        {
+            0 => new YamlMappingNode(),
+            1 when stream.Documents[0].RootNode is YamlMappingNode mapping => mapping,
+            1 => throw new VmMetadataException("The block must be a YAML mapping."),
+            _ => throw new VmMetadataException("The block must be one YAML document."),
+        };
+    }
+
+    private static string ReadProvisioning(YamlMappingNode root)
+    {
+        var status = Child(root, ProvisioningKey) switch
+        {
+            null => ProvisioningStatus.Pending,
+            YamlScalarNode scalar => scalar.Value,
+            YamlMappingNode mapping when Child(mapping, StatusKey) is YamlScalarNode scalar => scalar.Value,
+            _ => throw new VmMetadataException($"{ProvisioningKey} must be a status, or a mapping with {StatusKey}."),
+        };
+        return status is ProvisioningStatus.Pending or ProvisioningStatus.Complete or ProvisioningStatus.Failed
+            ? status
+            : throw new VmMetadataException($"{ProvisioningKey} must be {ProvisioningStatus.Pending}, {ProvisioningStatus.Complete} or {ProvisioningStatus.Failed}.");
+    }
+
+    private void Validate()
+    {
+        // First, so that nothing below meets a shared node or a tagged key.
+        ValidateNode(root, 0);
+
+        foreach (var key in root.Children.Keys)
+        {
+            if (key is not YamlScalarNode { Value: MetaDataKey or UserDataKey or ProvisioningKey })
+            {
+                throw new VmMetadataException($"The only top-level keys are {MetaDataKey}, {UserDataKey} and {ProvisioningKey}. A misspelled key would be ignored, and a value meant to be sensitive could stay in the notes.");
+            }
+        }
+
+        if (Child(root, MetaDataKey) is { } metaData)
+        {
+            if (metaData is not YamlMappingNode metaDataMapping)
+            {
+                throw new VmMetadataException($"{MetaDataKey} must be a mapping.");
+            }
+
+            if (Child(metaDataMapping, InstanceIdKey) is not null)
+            {
+                throw new VmMetadataException($"{MetaDataKey} must not set {InstanceIdKey}: it comes from the VM's BIOS GUID.");
+            }
+        }
+
+        if (Child(root, UserDataKey) is { } userData && userData is not YamlScalarNode)
+        {
+            throw new VmMetadataException($"{UserDataKey} must be a string. Use a | block for several lines.");
+        }
+    }
+
+    private static void ValidateNode(YamlNode node, int depth)
+    {
+        if (depth > MaxDepth)
+        {
+            throw new VmMetadataException($"The block nests deeper than {MaxDepth} levels.");
+        }
+
+        // No anchors means no aliases, so the tree has no shared nodes: what is walked is what is written, and a
+        // sensitive value cannot also be reached under another name.
+        if (!node.Anchor.IsEmpty)
+        {
+            throw new VmMetadataException("The block must not use YAML anchors or aliases.");
+        }
+
+        switch (node)
+        {
+            case YamlMappingNode mapping:
+                RefuseTag(mapping);
+                foreach (var (key, value) in mapping.Children)
+                {
+                    if (key is not YamlScalarNode { Value: { Length: > 0 } name } || !key.Tag.IsEmpty
+                        || name.Any(c => c is '/' or '=' || char.IsWhiteSpace(c) || char.IsControl(c)))
+                    {
+                        throw new VmMetadataException("Keys must be plain text without '/', '=' or spaces, since they become paths.");
+                    }
+
+                    ValidateNode(key, depth + 1);
+                    ValidateNode(value, depth + 1);
+                }
+
+                break;
+            case YamlSequenceNode sequence:
+                RefuseTag(sequence);
+                foreach (var item in sequence.Children)
+                {
+                    ValidateNode(item, depth + 1);
+                }
+
+                break;
+            case YamlScalarNode scalar:
+                // A misspelled !sensitive must not pass as an ordinary value that stays in the notes for good.
+                if (!scalar.Tag.IsEmpty && !IsStandard(scalar.Tag) && !IsSensitive(scalar) && !IsCleared(scalar))
+                {
+                    throw new VmMetadataException($"Unknown tag on a value. The tags are {SensitiveTag} and {ClearedTag}.");
+                }
+
+                break;
+        }
+    }
+
+    private static void RefuseTag(YamlNode node)
+    {
+        if (!node.Tag.IsEmpty && !IsStandard(node.Tag))
+        {
+            throw new VmMetadataException($"{SensitiveTag} goes on each value, not on a mapping or a list.");
+        }
+    }
+
+    private static bool IsStandard(TagName tag) => tag.Value.StartsWith("tag:yaml.org,2002:", StringComparison.Ordinal);
+
+    private bool IsServed(YamlNode node) =>
+        node is not YamlScalarNode scalar
+        || (!IsCleared(scalar) && (!IsSensitive(scalar) || Provisioning == ProvisioningStatus.Pending));
+
+    private void WriteJson(Utf8JsonWriter writer, YamlNode node)
+    {
+        // Everything is a string: the API serves text, so "no" and "012" stay as the operator wrote them.
+        switch (node)
+        {
+            case YamlMappingNode mapping:
+                writer.WriteStartObject();
+                foreach (var (key, value) in mapping.Children.Where(c => IsServed(c.Value)))
+                {
+                    writer.WritePropertyName(((YamlScalarNode)key).Value!);
+                    WriteJson(writer, value);
+                }
+
+                writer.WriteEndObject();
+                break;
+            case YamlSequenceNode sequence:
+                writer.WriteStartArray();
+                foreach (var item in sequence.Children.Where(IsServed))
+                {
+                    WriteJson(writer, item);
+                }
+
+                writer.WriteEndArray();
+                break;
+            case YamlScalarNode scalar:
+                writer.WriteStringValue(scalar.Value ?? "");
+                break;
+        }
+    }
+
+    private static YamlNode? Child(YamlMappingNode mapping, string key) =>
+        mapping.Children.TryGetValue(new YamlScalarNode(key), out var value) ? value : null;
+
+    private static bool IsSensitive(YamlScalarNode node) => !node.Tag.IsEmpty && node.Tag.Value == SensitiveTag;
+
+    private static bool IsCleared(YamlScalarNode node) => !node.Tag.IsEmpty && node.Tag.Value == ClearedTag;
+
+    private static IEnumerable<YamlScalarNode> Scalars(YamlNode node) => node switch
+    {
+        YamlScalarNode scalar => [scalar],
+        YamlMappingNode mapping => mapping.Children.Values.SelectMany(Scalars),
+        YamlSequenceNode sequence => sequence.Children.SelectMany(Scalars),
+        _ => [],
+    };
+}

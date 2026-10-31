@@ -1,9 +1,14 @@
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <!--
-    The proof command for Windows VM images: msiexec /i proof.msi /qn. It has no properties and no dialogs.
-    It puts the install folder on the machine PATH, and does not write %ProgramData%\Proof\config.json, which
-    belongs to the image (Design.md 9).
+    For Windows VM images: msiexec /i proof.msi /qn. It has no properties and no dialogs.
+
+    The proof command: it puts the install folder on the machine PATH, and does not write
+    %ProgramData%\Proof\config.json, which belongs to the image (Design.md 9).
+
+    The proof-metadata service: serves instance metadata on 127.0.0.1 (Design.md 16). It needs no settings, starts
+    whether or not the host serves metadata, and runs as Local Service, since it needs only loopback and the Hyper-V
+    socket. Local Service cannot register an event log source, so the MSI does.
   -->
   <Package Name="Proof Client"
            Manufacturer="Proof"
@@ -27,6 +32,27 @@
         <File Source="$(var.PayloadDir)proof.exe" KeyPath="yes" />
         <!-- Removed again on uninstall. New processes see it; running ones keep the PATH they started with. -->
         <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(var.PayloadDir)proof-metadata.exe" KeyPath="yes" />
+        <ServiceInstall Name="proof-metadata"
+                        DisplayName="Proof Instance Metadata"
+                        Description="Serves this VM's instance metadata from its Hyper-V host on 127.0.0.1, for Cloudbase-Init."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="NT AUTHORITY\LocalService"
+                        Vital="yes">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="5"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+        <ServiceControl Name="proof-metadata" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        <RegistryValue Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\proof-metadata"
+                       Name="TypesSupported" Type="integer" Value="7" />
       </Component>
     </Feature>
 

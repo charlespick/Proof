@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Proof.Client/Proof.Client.csproj" />
     <Project Path="src/Proof.Issuer/Proof.Issuer.csproj" />
+    <Project Path="src/Proof.Metadata/Proof.Metadata.csproj" />
     <Project Path="src/Proof.Refresher/Proof.Refresher.csproj" />
     <Project Path="src/Proof.Shared/Proof.Shared.csproj" />
   </Folder>

@@ -16,7 +16,8 @@ Proof lets a Hyper-V VM prove which VM it is to on-premises services, using a sh
 
 - Authorization: no roles, labels or policy. Consumers decide what an identity may do.
 - Revocation machinery, proof of possession, or replay protection beyond short token lifetimes.
-- SPIRE or any other identity framework, and emulation of AWS, Azure or GCP metadata endpoints.
+- SPIRE or any other identity framework.
+- Emulating AWS, Azure or GCP beyond what cloud-init and Cloudbase-Init read from the EC2 instance metadata API (section 16).
 - VM creation, the management UI, and the consumer integrations themselves (Puppet, step-ca, MicroK8s). Those are separate work that will consume Proof's identity.
 
 **Principles**
@@ -30,7 +31,7 @@ Proof lets a Hyper-V VM prove which VM it is to on-premises services, using a sh
 
 ## 2. Decision log
 
-Thirteen decisions are settled or proposed. "Decided" means you chose it in our discussion. "Proposed" means I recommend it and you have not confirmed it.
+Seventeen decisions are settled or proposed. "Decided" means you chose it in our discussion. "Proposed" means I recommend it and you have not confirmed it.
 
 | # | Decision | Reason | Status |
 | --- | --- | --- | --- |
@@ -41,12 +42,16 @@ Thirteen decisions are settled or proposed. "Decided" means you chose it in our 
 | 5 | No SPIRE. Build the issuer on JOSE libraries | Less to run; libraries do the cryptography | Decided |
 | 6 | Host refresher is written in C# | Needs WMI and Windows key storage | Decided |
 | 7 | Audience-specific tokens are requested on demand through RFC 8693 token exchange. The KVP token has one fixed audience (the issuer) | An OIDC audience cannot be minted ahead of time | Decided |
-| 8 | No metadata service, cloud-init or Cloudbase-Init. The host writes the token over KVP and a small VM client fetches JWTs | Smaller moving parts | Decided |
+| 8 | Identity needs no metadata service or cloud-init: the host writes the token over KVP and a small VM client fetches JWTs. Provisioning data is decision 14 | Smaller moving parts | Decided |
 | 9 | Issuer and VM client are also C#/.NET | One language and one JOSE library family across all components; garbage-collected and compiled; runs on Linux | Proposed |
 | 10 | ES256 (ECDSA P-256) for host tokens and issued tokens; RS256 only if a federation target requires it | Small signatures, built into Windows CNG, accepted by GCP | Proposed |
 | 11 | Verification logic is not a Proof deliverable: consumers verify issued JWTs with standard OIDC and JWT libraries, as they would any OIDC token | OIDC is the common standard, so consumers use the validation they already have | Proposed |
 | 12 | The issuer runs on Linux as a Kubernetes Deployment, and its configuration and host allowlist are delivered by your existing GitOps | Fits your platform, and changes go through the review you already have | Decided |
 | 13 | Host keys are non-exportable CNG machine keys in the Microsoft Software Key Storage Provider. No TPM | Every Windows host has it; no hardware dependency or per-host variation | Decided |
+| 14 | Serve an EC2-style instance metadata API for cloud-init and Cloudbase-Init, from each VM's Hyper-V notes, over Hyper-V sockets, through a loopback service in the VM. The issuer has no part in it | Provisioning without a network path to anything, and a VM cannot ask for another's data | Decided |
+| 15 | A VM's data is YAML between marker lines in its notes, with `!sensitive` on values cleared when provisioning finishes | Operators edit it in Hyper-V Manager, other text in the notes is unaffected, and a tag is YAML's own way to mark a value without changing it | Proposed |
+| 16 | The instance ID is the VM's BIOS GUID | A copy can keep it or be given a new one, so a clone is the same instance or a new one by choice | Decided |
+| 17 | Using this is opted into by installing `proof-metadata` and pointing the image's provisioning at it. A VM with no block gets its instance ID and hostname, and a phone-home from it adds a block with only the status. `UnsetMetadataHandler: 404` refuses such VMs instead | A 404 makes cloud-init wait out `max_wait` on every boot, and an unasked-for phone-home is worth a record | Decided |
 
 ## 3. Architecture
 
@@ -68,13 +73,14 @@ The host signs a token into each VM's KVP, and the VM trades that token for audi
 
 ## 4. Components and languages
 
-Three programs are ours to write; Hyper-V stays as it is.
+Four programs are ours to write; Hyper-V stays as it is.
 
 | Component | Runs on | Language | Responsibility |
 | --- | --- | --- | --- |
 | Host refresher (`proof-refresher`) | Each Hyper-V host, as a Windows service | C#/.NET | When a VM starts or migrates in, and about every 5 minutes for each running VM: sign a host token with the host key and write it into that VM's KVP External pool |
 | Issuer (`proof-issuer`) | Kubernetes on Linux, as a Deployment with two replicas | C#/.NET, ASP.NET Core | Verify host tokens against the allowlist; mint audience-specific JWTs at `/token` (RFC 8693); serve the discovery document and JWKS |
 | VM client (`proof`) | Every VM image, Linux and Windows | C#/.NET, self-contained single file | Read the host token from KVP; call the issuer; print or write the result |
+| Metadata service (`proof-metadata`) | Every VM image, Linux and Windows, as a service | C#/.NET, self-contained single file | Translate the EC2 instance metadata API on 127.0.0.1 to requests over the Hyper-V socket (section 16) |
 
 **Notes**
 
@@ -512,6 +518,13 @@ Pages consulted for this specification. Items marked Verified in section 10 come
 - [Signing JWTs with ECDSA in .NET](https://www.scottbrady.io/c-sharp/jwt-signing-using-ecdsa-in-dotnet-core)
 - [lestrrat-go/jwx (see its Changes file for the security fixes)](https://github.com/lestrrat-go/jwx)
 
+- [Make your own integration services (Hyper-V sockets, the vsock GUID template)](https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/user-guide/make-integration-service)
+
+**Cloud-init and Cloudbase-Init**
+
+- [cloud-init's EC2 datasource](https://github.com/canonical/cloud-init/blob/main/cloudinit/sources/DataSourceEc2.py), [its metadata crawl](https://github.com/canonical/cloud-init/blob/main/cloudinit/sources/helpers/ec2.py), [phone_home](https://github.com/canonical/cloud-init/blob/main/cloudinit/config/cc_phone_home.py) and [ds-identify](https://github.com/canonical/cloud-init/blob/main/tools/ds-identify)
+- [Cloudbase-Init's EC2 service](https://github.com/cloudbase/cloudbase-init/blob/master/cloudbaseinit/metadata/services/ec2service.py)
+
 **Token exchange, OIDC and federation**
 
 - [RFC 8693 token exchange parameters](https://www.authlete.com/developers/token_exchange)
@@ -521,3 +534,148 @@ Pages consulted for this specification. Items marked Verified in section 10 come
 - [Entra federation with SPIFFE/SPIRE (`use: sig` on JWKS keys)](https://docs.azure.cn/en-us/entra/workload-id/workload-identity-federation-spiffe-spire)
 - [Entra must reach the discovery document and JWKS over HTTPS](https://docs.crewai.com/en/enterprise/features/secrets-manager/azure-workload-identity)
 - [Prior art: tsiam, a node-identity JWT service for federation](https://github.com/italypaleale/tsiam)
+
+## 16. Instance metadata
+
+The same two packages also give VMs an EC2-style instance metadata API for cloud-init and Cloudbase-Init. The data lives in each VM's Hyper-V notes. The issuer has no part in it, and nothing here touches host tokens or the allowlist.
+
+### 16.1 How it fits together
+
+1. An operator writes a metadata block into the VM's notes, in Hyper-V Manager or with `Set-VM -Notes`.
+2. Cloud-init or Cloudbase-Init in the VM calls `http://127.0.0.1:8169/latest/...`, served by `proof-metadata`, which listens on loopback only.
+3. `proof-metadata` connects to the host over a Hyper-V socket: `AF_HYPERV` to `HV_GUID_PARENT` on Windows, `AF_VSOCK` to CID 2 on Linux (the `hv_sock` module).
+4. `proof-refresher` listens for its VMs (`HV_GUID_CHILDREN`). The hypervisor reports each connection's VM ID, so a VM never names itself and cannot ask for another's data. It reads that VM's notes over WMI and answers.
+5. When provisioning finishes, the guest posts to `/proof/v1/provisioning/complete`. The host records the status and clears the sensitive values from the notes.
+
+**Trust boundaries**
+
+- The socket's VM ID is the only identity. A request has no field for one.
+- Guests are not trusted by the host. Requests are at most 1 KB, connections at most 64 at once and 30 seconds each, and each VM at most 120 requests a minute. No text a guest sends reaches the notes: a finish carries one of two fixed words.
+- Inside a VM, any local program can read the API and can report provisioning finished, as on EC2. So anything marked sensitive is readable by any account in the VM until it is cleared, and any account can clear it early.
+- Web pages in a browser in the VM can reach loopback, so requests with an `Origin` or `X-Forwarded-For` header, or a `Host` that is not a loopback name, are refused. That stops DNS rebinding and cross-site form posts.
+- Host administrators, and anyone who may read VM settings, can read the notes. Sensitive values are in plain text there until cleared.
+
+### 16.2 The notes format
+
+A VM's data sits between two marker lines, each alone on its line and starting at the first column. Everything outside them is left alone, so notes can hold ordinary text too. The YAML is between them:
+
+```yaml
+Owned by the web team.
+#proof-metadata-begin
+meta-data:
+  local-hostname: web01
+  public-keys:
+    - ssh-ed25519 AAAA... me@example
+  admin-pass: !sensitive hunter2
+user-data: !sensitive |
+  #cloud-config
+  password: hunter2
+  phone_home:
+    url: http://127.0.0.1:8169/proof/v1/provisioning/complete
+    post: [instance_id]
+#proof-metadata-end
+```
+
+| Key | Meaning |
+| --- | --- |
+| `meta-data` | A mapping, served under `meta-data/`. Values are served as the text written, so `no` and `012` stay as they are. `instance-id` is refused: it comes from the BIOS GUID. `local-hostname` defaults to the VM name if that can be a hostname |
+| `user-data` | One string, served as it is at `user-data`. Use a `\|` block for several lines. Hyper-V holds at most 32,768 characters of notes in all, and refuses more (measured) |
+| `provisioning` | `pending`, `complete` or `failed`. Absent means pending. The host writes `{ status: complete, at: "...", instance-id: i-... }` when it finishes. To provision again, set it back to `pending` |
+
+**Sensitive values.** `!sensitive` is a YAML tag, so it is not part of the value: the guest receives the value without it, and any scalar can carry it, including a block scalar. When provisioning finishes the host replaces the value in the notes, so the text is gone, not hidden:
+
+```yaml
+  admin-pass: !cleared "2026-10-31T12:00:00Z"
+user-data: !cleared "2026-10-31T12:00:00Z"
+provisioning: { status: complete, at: "2026-10-31T12:00:00Z", instance-id: i-00112233445566778899aabbccddeeff }
+```
+
+The rules, chosen to fail closed:
+
+- `!sensitive` values are served only while provisioning is `pending`. One added to a finished VM is not served until the status is set back to `pending`, and the host's log says so.
+- `failed` clears sensitive values just as `complete` does. A secret should not outlive the attempt, and a retry is an operator's decision: they supply the value again.
+- The first result stands. Later reports change nothing, except that any sensitive value still present is cleared.
+- Only the spans of the sensitive values and the status change, so comments and layout survive. The edited notes are parsed again before they are written, and if anything sensitive remains or the status is wrong, nothing is written and the guest gets an error it can retry.
+- A block that cannot be used is not served at all, not even the basic data of 16.8, and the host's log says why without quoting it. That includes unknown top-level keys and unknown tags, because a misspelled `!sensitive` must not pass as an ordinary value that stays in the notes for good. YAML anchors and aliases are refused, so a sensitive value cannot be reached under a second name.
+
+### 16.3 Instance identity
+
+`instance-id` is `i-` and the VM's BIOS GUID (`Msvm_VirtualSystemSettingData.BIOSGUID`), the SMBIOS UUID the guest sees. It is not the VM ID, which is what the socket reports and what identifies the VM for this service. So a clone is either:
+
+- **The same instance:** a copy that keeps the BIOS GUID, which is the default: `Import-VM -Copy` keeps it with or without `-GenerateNewId`, even though the latter changes the VM ID (verified). Cloud-init sees the instance ID it knows and does not provision again (verified).
+- **A new instance:** give the copy a new BIOS GUID with `proof-refresher metadata new-instance-id --vm <name>` while it is off. Cloud-init runs its per-instance modules again (verified). The notes copy with the VM, so if the source had finished, set `provisioning` back to `pending` and supply any sensitive values again.
+
+### 16.4 The API
+
+Served only on `127.0.0.1`, port 8169 by default.
+
+| Path | Answer |
+| --- | --- |
+| `GET /` | The versions, one per line |
+| `GET /<version>` | `meta-data`, and `user-data` if there is any. `<version>` is `latest` or any date such as `2009-04-04`; the tree does not vary |
+| `GET /<version>/meta-data/...` | A directory lists its children one per line, with a `/` on directories; a leaf is its text. A list of strings is one leaf of lines. Other lists are indexed directories |
+| `GET /<version>/meta-data/public-keys/` | `0=name` per key, then `public-keys/0/openssh-key`. In the notes `public-keys` may be one key, a list or a mapping from name to key |
+| `GET /<version>/user-data` | The bytes, or 404 |
+| `PUT /latest/api/token` | An IMDSv2 session token. Needs `X-aws-ec2-metadata-token-ttl-seconds`, 1 to 21600. A token is optional on reads, as cloud-init and Cloudbase-Init differ, but a wrong or expired one gets 401 |
+| `GET /proof/v1/provisioning` | The status, or `none` with no block. Proof's own; EC2 has no such thing |
+| `POST /proof/v1/provisioning/complete` or `/failed` | Records it and clears sensitive values. The body is ignored. Answers with the status that stands |
+
+404 means the path does not exist, or the VM has no block and `UnsetMetadataHandler` is `404`. Cloud-init's probe retries a 404 until its `max_wait`, then carries on with no datasource, so such a VM boots normally but that much later (measured: login after 103 seconds with `max_wait: 60`, against 47 with basic data). 503 means the host cannot be reached or cannot serve this VM yet, and clients retry.
+
+EC2 has no call for "provisioning finished". Cloud-init's `phone_home` module fits: it posts to any URL with retries, late in its final stage. Cloudbase-Init has no equivalent for its EC2 service, so the last step of its user data posts instead. A guest whose provisioning never reports keeps its secrets; `proof-refresher metadata finish` does it from the host.
+
+The guest keeps the host's answer for 5 seconds, since a crawl reads dozens of paths, and drops it when provisioning finishes.
+
+### 16.5 The socket protocol
+
+Service ID `50524f46-facb-11e6-bd58-64006a7986d3`, which is also Linux port `0x50524F46` under Hyper-V's vsock template. `proof-refresher service grant` registers it under `GuestCommunicationServices`, which Hyper-V requires.
+
+One request per connection. Each message is a 32-bit little-endian length and that many bytes of UTF-8 JSON. Requests are `{"op":"get"}` and `{"op":"finish","result":"complete"}`. The response has `status` (`ok`; `not-enrolled`, for a caller that is no VM of this host or a VM refused under 16.8; `invalid`; or `unavailable`) and, when `ok`, `instanceId`, `provisioning`, `metaData` and `userData`. It carries no detail about a bad block: that is in the host's log.
+
+### 16.6 Gotchas
+
+| # | Gotcha | What to do | Status |
+| --- | --- | --- | --- |
+| 1 | An async connect on an unbound `AF_HYPERV` socket fails with "invalid argument": it is `ConnectEx`, and .NET binds first only for IP | Bind to the zero address first | Verified (loopback on Windows Server 2025; regression test) |
+| 2 | Kestrel's configuration loader fails with `TypeLoadException` at start once trimmed | Use `CreateEmptyBuilder`, which leaves it out and also stops configuration from widening the address | Verified |
+| 3 | Binding a Hyper-V socket with `HV_GUID_CHILDREN` needs no elevation, even for an unregistered service, so a bind that works does not show that VMs can connect | Run `service grant` on every host, as Microsoft's documentation requires. The tested path had the registration; connecting without it was not tried | Bind verified |
+| 4 | Checkpoints hold a copy of the settings, notes included | Clearing does not reach them. Do not checkpoint a VM holding secrets, or delete those checkpoints | Verify |
+| 5 | Hyper-V Manager's settings dialog writes the notes it opened with | Clearing during an open dialog can be undone by saving it. Such values are not served again, and the next finish clears them | Design note |
+| 6 | A `network` key in `meta-data` must have `interfaces.macs`, or cloud-init raises. Without one it logs `Metadata 'network' key not valid: None` and uses its fallback, which is harmless | Leave it out | From the cloud-init source; the warning verified |
+| 7 | Cloud-init's `ds-identify` drops Ec2 on an unknown platform by default | Make Ec2 the only datasource (README) | Verified on Debian 12 |
+| 8 | `GetText` on a WMI object writes a bare CR, which the Hyper-V provider's XML parser drops, turning CRLF notes into LF on any settings change. It uses CDATA when the text holds markup, so its output cannot be patched | Pass a placeholder through it and substitute XML-escaped notes with `&#13;` | Verified on Windows Server 2025 |
+| 10 | A block added after a first boot with basic data does nothing: same instance ID, so cloud-init does not run the user data, and sensitive values stay in the notes and the API with no report to clear them | Write the block before first boot, or run `new-instance-id` | Verified |
+| 9 | `Get-VM` in a PowerShell session can keep showing notes it has already seen after another process changes them. Changing another setting from that session does not write them back | Read through CIM, or a new session, to see what the host holds | Verified on Windows Server 2025 |
+
+### 16.7 What has been tested
+
+On a Windows Server 2025 Hyper-V host, with both services installed from the MSIs and a Debian 12 cloud image (cloud-init 22.4.2) whose `proof-metadata` was copied in by hand, in a VM with no network adapter:
+
+- Cloud-init provisioned from the notes: instance ID, hostname, SSH key and user data, with `phone_home` reporting completion. The refresher received the connection as `NT SERVICE\proof-refresher`.
+- The host cleared the sensitive values, kept the comment and the text around the block, and recorded the status. The API stopped serving those values at once.
+- The instance ID matched the guest's `/sys/class/dmi/id/product_uuid`. A reboot did not provision again; a new BIOS GUID did.
+- A misspelled tag served nothing and the host logged why; ordinary notes were left alone. The VM booted in both cases.
+- An uncached request took about 45 ms from the guest. Of 140 quick requests, those over the limit got 503.
+
+### 16.8 VMs with no block
+
+Using this is opted into by installing `proof-metadata` and pointing the image's provisioning at it, so a block is not needed to get an answer. `Proof:UnsetMetadataHandler` on the host says what a VM with no block gets:
+
+| Value | Reads | A report that provisioning finished |
+| --- | --- | --- |
+| `minimal` (default) | `instance-id` and `local-hostname`, status `none`, no user data. Nothing else in the notes is read as data | Added to the end of the notes: the markers and one `provisioning` line, in the notes' own line ends. The VM then has a block, so later reports change nothing |
+| `404` | 404 | 404, and the notes are not touched |
+
+Only the status and the instance ID go in that line, as for any report, and a guest cannot add text of its own. A broken block is never treated as no block: it serves nothing and is not appended to.
+
+Verified on the VM of 16.7, with `phone_home` set in the image: no retries and login after 47 seconds, against 103 with `404` and 109 with a broken block; the hostname set from the VM name; the block added below the existing notes; and notes untouched under `404` and with a broken block.
+
+### 16.9 Open items
+
+| # | Open item | Settled by |
+| --- | --- | --- |
+| 1 | A Windows guest and Cloudbase-Init. `AF_HYPERV` was tested by host loopback only, and the paths Cloudbase-Init reads by unit test only (from its source) | First test on a Windows VM |
+| 2 | The .deb's install scripts, which the test above bypassed, and its service on a real package install | CI's first run, then a guest |
+| 3 | Ubuntu and other kernels' `hv_sock` packaging, and newer cloud-init versions, including their use of IMDSv2 tokens. The test's cloud-init did not ask for one; the API's token path was exercised directly | Image build |
+| 4 | Live migration, which drops the socket. The guest should just retry, and notes move with the VM | First test on a cluster |
+| 5 | Whether checkpoints keep cleared values (gotcha 4), and other ways of copying a VM, such as restores from backup, for the BIOS GUID | Test before relying on them |

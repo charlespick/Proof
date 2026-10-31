@@ -13,6 +13,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.14" />
     <!-- WMI for the Hyper-V KVP methods. It uses built-in COM, so publish self-contained single-file, not NativeAOT. -->
     <PackageReference Include="System.Management" Version="10.0.14" />
+    <!-- Instance metadata lives in each VM's notes as YAML. -->
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
 
   <ItemGroup>

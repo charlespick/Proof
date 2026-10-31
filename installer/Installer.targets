@@ -1,8 +1,9 @@
 <Project>
 
   <!--
-    Shared by the MSI projects. Each sets PayloadProject (the program's .csproj), then imports this file. The
-    program's project makes a win-x64 publish self-contained and single-file, so a machine needs nothing but the MSI.
+    Shared by the MSI projects. Each sets PayloadProject (the program's .csproj), and SecondPayloadProject if it
+    ships another, then imports this file. The program's project makes a win-x64 publish self-contained and
+    single-file, so a machine needs nothing but the MSI.
   -->
 
   <PropertyGroup>
@@ -18,6 +19,7 @@
 
     <!-- The version goes down explicitly, so the program carries exactly the version the MSI does. -->
     <Exec Command="dotnet publish &quot;$(PayloadProject)&quot; -c $(Configuration) -r win-x64 -p:DebugType=none -p:ProofVersion=$(ProofVersion) -p:ProofCommit=$(ProofCommit) -p:ProofCommitsSinceTag=$(ProofCommitsSinceTag) -o &quot;$(PayloadDir.TrimEnd('\'))&quot;" />
+    <Exec Condition="'$(SecondPayloadProject)' != ''" Command="dotnet publish &quot;$(SecondPayloadProject)&quot; -c $(Configuration) -r win-x64 -p:DebugType=none -p:ProofVersion=$(ProofVersion) -p:ProofCommit=$(ProofCommit) -p:ProofCommitsSinceTag=$(ProofCommitsSinceTag) -o &quot;$(PayloadDir.TrimEnd('\'))&quot;" />
 
     <PropertyGroup>
       <DefineConstants>$(DefineConstants);ProductVersion=$(ProofMsiVersion);PayloadDir=$(PayloadDir);LicenseFile=$(ProofRepoRoot)LICENSE</DefineConstants>

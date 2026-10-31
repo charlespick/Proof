@@ -5,6 +5,7 @@ using System.Security.Principal;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Proof.Refresher;
+using Proof.Refresher.Metadata;
 
 if (!OperatingSystem.IsWindows())
 {
@@ -20,6 +21,9 @@ try
         ["key", "create", .. var rest] => Commands.KeyCreate(rest),
         ["key", "show"] => Commands.KeyShow(),
         ["once", .. var rest] => await Commands.OnceAsync(rest),
+        ["metadata", "show", "--vm", var vm] => await Commands.MetadataShowAsync(vm),
+        ["metadata", "finish", "--vm", var vm, "--result", var result] => await Commands.MetadataFinishAsync(vm, result),
+        ["metadata", "new-instance-id", "--vm", var vm] => await Commands.MetadataNewInstanceIdAsync(vm),
         ["service", "grant"] => Commands.ServiceGrant(),
         ["service", "revoke"] => Commands.ServiceRevoke(),
         ["--version"] => Commands.Version(),
@@ -45,16 +49,25 @@ internal static class Commands
         proof-refresher key show             Print the host key's allowlist entry and who may use it.
         proof-refresher once [--vm <name or id>]
                                              Write a token to every running VM (or one VM) now, and report.
+        proof-refresher metadata show --vm <name or id>
+                                             Check a VM's metadata block and say what it would serve, without
+                                             printing sensitive values.
+        proof-refresher metadata finish --vm <name or id> --result <complete|failed>
+                                             Do what a VM reporting that it finished provisioning does: record the
+                                             status and clear the sensitive values.
+        proof-refresher metadata new-instance-id --vm <name or id>
+                                             Give a VM that is off a new BIOS GUID, and so a new instance ID.
         proof-refresher service grant        Run the installed service as its virtual account, NT SERVICE\proof-refresher,
                                              and give that account what it needs: Hyper-V Administrators, read on
-                                             the host key, and its event log source. The MSI runs it; run it again
-                                             after creating a new host key.
-        proof-refresher service revoke       Take the account out of Hyper-V Administrators.
+                                             the host key, and its event log source. Also register the instance
+                                             metadata socket with Hyper-V. The MSI runs it; run it again after
+                                             creating a new host key.
+        proof-refresher service revoke       Take the account out of Hyper-V Administrators, and unregister the socket.
         proof-refresher --version            Print the version.
 
         Settings come from appsettings.json next to the executable, then %ProgramData%\Proof\refresher.json,
         then environment variables (Proof__IssuerUrl, Proof__HostId, Proof__Cluster, Proof__HostKeyName,
-        Proof__ScanInterval).
+        Proof__ScanInterval, Proof__MetadataEnabled, Proof__UnsetMetadataHandler).
         """;
 
     public static int Usage()
@@ -74,6 +87,8 @@ internal static class Commands
         var builder = CreateBuilder(args);
         builder.Services.AddWindowsService(options => options.ServiceName = "proof-refresher");
         builder.Services.AddHostedService<Worker>();
+        builder.Services.AddSingleton<MetadataRequestHandler>();
+        builder.Services.AddHostedService<MetadataServer>();
 
         using var host = builder.Build();
         // Fail at startup, not on the first pass, if the settings or the host key are wrong. Log it too, because a
@@ -153,6 +168,9 @@ internal static class Commands
         Console.Error.WriteLine(ServiceAccess.EnsureEventSource()
             ? $"Registered the event log source '{ServiceAccess.ServiceName}'."
             : $"The event log source '{ServiceAccess.ServiceName}' is already registered.");
+        Console.Error.WriteLine(ServiceAccess.RegisterMetadataSocket()
+            ? $"Registered the instance metadata socket {Proof.Shared.MetadataService.ServiceId} with Hyper-V."
+            : $"The instance metadata socket {Proof.Shared.MetadataService.ServiceId} is already registered.");
 
         // The key last, and not an error when it cannot be granted: the service then refuses to start, and says why
         // in the event log, which the source registered above makes possible.
@@ -185,7 +203,110 @@ internal static class Commands
         Console.Error.WriteLine(ServiceAccess.RemoveFromHyperVAdministrators(ServiceAccess.AccountSid())
             ? $"Removed {account} from Hyper-V Administrators."
             : $"{account} was not in Hyper-V Administrators.");
+        Console.Error.WriteLine(ServiceAccess.UnregisterMetadataSocket()
+            ? "Unregistered the instance metadata socket."
+            : "The instance metadata socket was not registered.");
         return 0;
+    }
+
+    public static async Task<int> MetadataShowAsync(string nameOrId)
+    {
+        var vms = new WmiHyperVHost();
+        if (await FindVmAsync(vms, nameOrId) is not { } vm)
+        {
+            return 1;
+        }
+
+        Console.WriteLine($"VM           {vm.Id}  {vm.Name}");
+        Console.WriteLine($"Instance ID  {MetadataRequestHandler.InstanceIdFor(vm.BiosGuid)}");
+        try
+        {
+            if (VmMetadataBlock.Find(vm.Notes) is not { } block)
+            {
+                Console.WriteLine(LoadOptions().UnsetMetadataHandler == UnsetMetadataHandlers.NotFound
+                    ? "No metadata block, and Proof:UnsetMetadataHandler is 404: it gets 404."
+                    : "No metadata block: it gets its instance ID and local-hostname only.");
+                return 0;
+            }
+
+            Console.WriteLine($"Provisioning {block.Provisioning}");
+            Console.WriteLine($"Sensitive    {block.SensitiveCount} values not yet cleared");
+            var response = block.ToResponse(MetadataRequestHandler.InstanceIdFor(vm.BiosGuid), MetadataRequestHandler.HostnameFrom(vm.Name));
+            Console.WriteLine($"Serves       {string.Join(", ", response.MetaData!.Value.EnumerateObject().Select(p => p.Name))}{(response.UserData is null ? "" : ", user-data")}");
+            return 0;
+        }
+        catch (VmMetadataException ex)
+        {
+            Console.Error.WriteLine($"The metadata block cannot be used. {ex.Message}");
+            return 1;
+        }
+    }
+
+    public static async Task<int> MetadataFinishAsync(string nameOrId, string result)
+    {
+        if (!Proof.Shared.ProvisioningStatus.IsFinishResult(result))
+        {
+            return Usage();
+        }
+
+        var vms = new WmiHyperVHost();
+        if (await FindVmAsync(vms, nameOrId) is not { } vm)
+        {
+            return 1;
+        }
+
+        var handler = new MetadataRequestHandler(vms, Options.Create(LoadOptions()), TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<MetadataRequestHandler>.Instance);
+        var response = await handler.HandleAsync(vm.Id, new Proof.Shared.MetadataRequest(Proof.Shared.MetadataOperations.Finish, result), CancellationToken.None);
+        if (response.Status != Proof.Shared.MetadataResponseStatus.Ok)
+        {
+            Console.Error.WriteLine($"Nothing was changed: {response.Status}. Run: proof-refresher metadata show --vm {vm.Id}");
+            return 1;
+        }
+
+        Console.WriteLine($"Provisioning {response.Provisioning}; sensitive values cleared.");
+        return 0;
+    }
+
+    public static async Task<int> MetadataNewInstanceIdAsync(string nameOrId)
+    {
+        var vms = new WmiHyperVHost();
+        if (await FindVmAsync(vms, nameOrId) is not { } vm)
+        {
+            return 1;
+        }
+
+        var biosGuid = Guid.NewGuid();
+        try
+        {
+            await vms.WriteBiosGuidAsync(vm.Id, biosGuid, CancellationToken.None);
+        }
+        catch (KvpWriteException ex)
+        {
+            Console.Error.WriteLine($"Hyper-V refused the change; the VM must be off. {ex.Message}");
+            return 1;
+        }
+
+        Console.WriteLine($"Instance ID  {MetadataRequestHandler.InstanceIdFor(biosGuid)} (was {MetadataRequestHandler.InstanceIdFor(vm.BiosGuid)})");
+        return 0;
+    }
+
+    private static async Task<VmSettings?> FindVmAsync(IVmNotes vms, string nameOrId)
+    {
+        var matches = (await vms.GetVmsAsync(CancellationToken.None))
+            .Where(v => string.Equals(v.Name, nameOrId, StringComparison.OrdinalIgnoreCase)
+                || (Guid.TryParse(nameOrId, out var id) && v.Id == id))
+            .ToList();
+        switch (matches.Count)
+        {
+            case 1:
+                return matches[0];
+            case 0:
+                Console.Error.WriteLine($"No VM named '{nameOrId}' or with that ID.");
+                return null;
+            default:
+                Console.Error.WriteLine($"{matches.Count} VMs are named '{nameOrId}'. Use an ID: {string.Join(", ", matches.Select(v => v.Id))}");
+                return null;
+        }
     }
 
     public static async Task<int> OnceAsync(string[] args)
@@ -246,7 +367,9 @@ internal static class Commands
 
         builder.Services.TryAddSingleton(TimeProvider.System);
         builder.Services.AddMetrics();
-        builder.Services.AddSingleton<IHyperVHost, WmiHyperVHost>();
+        builder.Services.AddSingleton<WmiHyperVHost>();
+        builder.Services.AddSingleton<IHyperVHost>(sp => sp.GetRequiredService<WmiHyperVHost>());
+        builder.Services.AddSingleton<IVmNotes>(sp => sp.GetRequiredService<WmiHyperVHost>());
         builder.Services.AddSingleton(sp => HostKeyStore.Open(sp.GetRequiredService<IOptions<RefresherOptions>>().Value.HostKeyName));
         builder.Services.AddSingleton<HostTokenSigner>();
         builder.Services.AddSingleton<TokenRefresher>();

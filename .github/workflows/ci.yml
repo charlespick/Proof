@@ -156,6 +156,7 @@ jobs:
         with:
           global-json-file: global.json
       - run: dotnet publish src/Proof.Client -c Release -r linux-x64 -p:DebugType=none -o publish/linux-x64
+      - run: dotnet publish src/Proof.Metadata -c Release -r linux-x64 -p:DebugType=none -o publish/linux-x64
       - run: packaging/debian/build-deb.sh publish/linux-x64 "${{ needs.version.outputs.deb-version }}" amd64 dist
       - name: Install and remove the package
         run: |
@@ -166,8 +167,17 @@ jobs:
           # Recommends would pull in the Hyper-V daemons, which a runner has no use for.
           sudo apt-get install -y --no-install-recommends "./$deb"
           test "$(proof --version)" = "$ProofVersion+$ProofCommit"
+          test "$(proof-metadata --version)" = "$ProofVersion+$ProofCommit"
+          systemctl is-active proof-metadata
+          systemctl is-enabled proof-metadata
+          curl -fsS http://127.0.0.1:8169/ | grep -x latest
+          # This runner has no Proof host, so the API says it cannot reach one.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8169/latest/meta-data/)" = 503
+          # Reachable only from this machine.
+          if ss -ltn | grep -E '(0\.0\.0\.0|\[::\]|\*):8169'; then echo "proof-metadata listens beyond loopback" >&2; exit 1; fi
           sudo apt-get remove -y proof
           if command -v proof; then echo "proof is still installed" >&2; exit 1; fi
+          if systemctl is-active proof-metadata; then echo "proof-metadata is still running" >&2; exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
           name: linux

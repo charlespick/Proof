@@ -1,0 +1,2 @@
+# Hyper-V sockets, which proof-metadata uses to reach its host.
+hv_sock

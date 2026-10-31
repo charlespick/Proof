@@ -4,14 +4,17 @@ Proof lets a Hyper-V VM prove which VM it is to on-premises services. The Hyper-
 
 Proof does authentication only. Consumers decide what an identity may do. See [Design.md](docs/Design.md) for the full specification.
 
+Separately, the same packages serve an [EC2-style instance metadata API](#instance-metadata) for cloud-init and Cloudbase-Init, from each VM's Hyper-V notes.
+
 ## Components
 
 | Project | Path | Role |
 | ------- | ---- | ---- |
-| `Proof.Refresher` | `src/Proof.Refresher` | Windows service on each Hyper-V host. Signs a host token for each VM and writes it into that VM's KVP pool about every 5 minutes. |
+| `Proof.Refresher` | `src/Proof.Refresher` | Windows service on each Hyper-V host. Signs a host token for each VM and writes it into that VM's KVP pool about every 5 minutes. Also answers VMs' instance metadata requests over Hyper-V sockets. |
 | `Proof.Issuer` | `src/Proof.Issuer` | ASP.NET Core service on Kubernetes. Verifies host tokens against the host-key allowlist, mints audience-specific JWTs at `/token` (RFC 8693), and serves the OIDC discovery document and JWKS. |
 | `Proof.Client` | `src/Proof.Client` | The `proof` command on every VM image. Reads the host token from KVP, calls the issuer, and prints or writes the issued JWT. |
-| `Proof.Shared` | `src/Proof.Shared` | Class library shared by all three programs: claim names, token types, validation settings and KVP limits. |
+| `Proof.Metadata` | `src/Proof.Metadata` | The `proof-metadata` service on every VM image. Serves the instance metadata API on `127.0.0.1`, from the host over a Hyper-V socket. |
+| `Proof.Shared` | `src/Proof.Shared` | Class library shared by the programs: claim names, token types, validation settings, KVP limits and the Hyper-V socket protocol. |
 
 ## Repository layout
 
@@ -31,6 +34,7 @@ src/
   Proof.Issuer/         includes the Dockerfile
   Proof.Refresher/
   Proof.Client/
+  Proof.Metadata/
 tests/
   Proof.Tests/
 ```
@@ -49,8 +53,8 @@ dotnet test --solution Proof.slnx
 | Package | Built by | Contents |
 | ------- | -------- | -------- |
 | `proof-refresher-<version>-x64.msi` | `dotnet build installer/Proof.Refresher.Installer/Proof.Refresher.Installer.wixproj -c Release` (Windows) | `proof-refresher.exe` as the `proof-refresher` service |
-| `proof-<version>-x64.msi` | `dotnet build installer/Proof.Client.Installer/Proof.Client.Installer.wixproj -c Release` (Windows) | `proof.exe`, on the machine `PATH` |
-| `proof_<version>_amd64.deb` | `dotnet publish src/Proof.Client -c Release -r linux-x64`, then `packaging/debian/build-deb.sh` | `/usr/bin/proof` |
+| `proof-<version>-x64.msi` | `dotnet build installer/Proof.Client.Installer/Proof.Client.Installer.wixproj -c Release` (Windows) | `proof.exe`, on the machine `PATH`, and `proof-metadata.exe` as the `proof-metadata` service |
+| `proof_<version>_amd64.deb` | `dotnet publish` of `src/Proof.Client` and `src/Proof.Metadata` with `-c Release -r linux-x64` to one folder, then `packaging/debian/build-deb.sh` | `/usr/bin/proof`, and `/usr/bin/proof-metadata` as the `proof-metadata` systemd service |
 | `ghcr.io/charlespick/proof-issuer:<version>` | `docker build -f src/Proof.Issuer/Dockerfile .` | The issuer, for `linux/amd64` and `linux/arm64` |
 
 Each MSI installs into `C:\Program Files\Proof` with `LICENSE.txt`. They build with [WiX](https://wixtoolset.org/) 5, which NuGet restores. `installer/Test-Installers.ps1` installs and removes both MSIs and checks what they do; it changes the machine, so CI runs it on a throwaway runner.
@@ -139,6 +143,8 @@ Settings come from `appsettings.json` next to the executable, then `%ProgramData
 | `Cluster` | none | This host's `cluster` in the allowlist. Omit for a standalone host |
 | `HostKeyName` | `Proof Host Key` | CNG key name. Use a new name to rotate (Design.md 7.3) |
 | `ScanInterval` | `00:05:00` | Time between scheduled passes, at most 5 minutes. Starts and migrations get their own pass |
+| `MetadataEnabled` | `true` | Serve [instance metadata](#instance-metadata). Off, no socket is opened |
+| `UnsetMetadataHandler` | `minimal` | What a VM with no metadata block gets. `minimal`: its instance ID and hostname, and a phone-home is recorded by adding a block with only the status. `404`: not found, and nothing is recorded. Any other value stops the refresher starting |
 
 Any user may create folders and files under `%ProgramData%` and then owns them, so a user could create `Proof\refresher.json` before an administrator does and edit it later. The refresher refuses to start, and its commands refuse to run, if `%ProgramData%\Proof` or `refresher.json` is a link, is owned by anyone but SYSTEM, Administrators or TrustedInstaller, or lets anyone else change or replace the file. The error names the account and the `icacls` command that fixes it. A folder and file an elevated administrator creates, as below, pass with the access they inherit from `%ProgramData%`.
 
@@ -169,9 +175,10 @@ The MSI installs the `proof-refresher` service to start automatically and restar
 
 - membership of Hyper-V Administrators. Without it, Hyper-V shows the account no VMs, so the refresher writes nothing and logs no error, and `proof.refresher.running_vms` reads 0;
 - read on the host key named in the settings;
-- the `proof-refresher` event log source, which only an administrator can register.
+- the `proof-refresher` event log source, which only an administrator can register;
+- the instance metadata service's registration with Hyper-V (not a right of the account, but it needs an administrator too).
 
-Windows Installer cannot install a service under a virtual account directly, so the MSI installs it as Local System and the grant step switches it to the virtual account. Upgrades and repairs run the grant again. After creating a new host key to rotate (Design.md 7.3), run `proof-refresher service grant`, or repair with `msiexec /fa`, before restarting the service. Uninstalling takes the account out of Hyper-V Administrators, removes the service, and leaves the settings, the host key and the event source.
+Windows Installer cannot install a service under a virtual account directly, so the MSI installs it as Local System and the grant step switches it to the virtual account. Upgrades and repairs run the grant again. After creating a new host key to rotate (Design.md 7.3), run `proof-refresher service grant`, or repair with `msiexec /fa`, before restarting the service. Uninstalling takes the account out of Hyper-V Administrators, unregisters the metadata socket, removes the service, and leaves the settings, the host key and the event source.
 
 Without the MSI, `proof-refresher key create` makes the key and prints the entry. Then `sc.exe create proof-refresher binPath= "C:\Program Files\Proof\proof-refresher.exe" start= auto` and `proof-refresher service grant` set up the service as the MSI would. `proof-refresher key show` prints the entry again, along with who may use the key.
 
@@ -256,12 +263,121 @@ dotnet publish src/Proof.Client -c Release -r win-x64
 
 The project has the AOT analyzers on, and `-p:PublishAot=true -p:PublishSingleFile=false` compiles without warnings. Linking a NativeAOT build needs the platform toolchain on a machine of the target OS, and that build has not been tried.
 
+## Instance metadata
+
+Proof also serves an EC2-style instance metadata API, for cloud-init and Cloudbase-Init. The data is YAML in the VM's Hyper-V notes. It reaches the VM over a Hyper-V socket, so it needs no network, and `proof-metadata` in the VM serves it on `127.0.0.1:8169`. The hypervisor names the calling VM, so a VM cannot ask for another's data. The issuer has no part in it. See [Design.md section 16](docs/Design.md).
+
+### On the VM: the notes
+
+A VM uses this only if its image has `proof-metadata` installed and its cloud-init or Cloudbase-Init pointed at it, so that configuration is the opt-in. Add a block to the VM's notes, in Hyper-V Manager or with `Set-VM -Notes`, to give it data. The rest of the notes stay yours:
+
+```yaml
+Owned by the web team.
+#proof-metadata-begin
+meta-data:
+  local-hostname: web01
+  public-keys:
+    - ssh-ed25519 AAAA... me@example
+user-data: !sensitive |
+  #cloud-config
+  password: hunter2
+  phone_home:
+    url: http://127.0.0.1:8169/proof/v1/provisioning/complete
+    post: [instance_id]
+#proof-metadata-end
+```
+
+- The marker lines start at the first column. The only top-level keys are `meta-data`, `user-data` and `provisioning`.
+- `!sensitive` marks a value to clear when provisioning finishes. The tag is not part of the value. Any single value can carry it, in `meta-data` or `user-data`.
+- `provisioning` is `pending` (the default), `complete` or `failed`. To provision again, set it back to `pending` and supply any sensitive values again.
+- `instance-id` comes from the VM's BIOS GUID and cannot be set here. `local-hostname` defaults to the VM's name, if that can be a hostname.
+- Hyper-V holds at most 32,768 characters of notes, block included, and refuses more.
+
+**Write the block before first boot.** A VM with no block gets its instance ID and hostname, and cloud-init provisions with those and records the instance as done. A block added afterwards does nothing until you run `new-instance-id` below, and any sensitive values in it wait in the notes and the API until then. If such a VM reports that it finished, the host adds the least block that records it to the end of the notes:
+
+```yaml
+#proof-metadata-begin
+provisioning: { status: complete, at: "2026-10-31T22:08:10Z", instance-id: i-6449418dc2894e1398caa391ec73b1e9 }
+#proof-metadata-end
+```
+
+Set `UnsetMetadataHandler` to `404` in `refresher.json` to refuse VMs with no block instead. Cloud-init retries a 404 until its `max_wait`, so they boot that much later.
+
+When the guest reports that provisioning finished, the host replaces each sensitive value in the notes with `!cleared "<time>"`, records the status, and keeps your comments and layout. A block that cannot be used serves nothing, not even the basic data, and `proof-refresher` logs why: otherwise cloud-init would finish without your user data, and fixing the typo would not run it again. Check one from the host:
+
+```powershell
+& "C:\Program Files\Proof\proof-refresher.exe" metadata show --vm web01             # what it would serve; never prints sensitive values
+& "C:\Program Files\Proof\proof-refresher.exe" metadata finish --vm web01 --result complete   # clear now, if the guest will never report
+```
+
+**Clones.** A copy that keeps the BIOS GUID is the same instance to cloud-init, and is not provisioned again. `Import-VM -Copy` keeps it, even with `-GenerateNewId`, which changes only the VM ID. To make a copy a new instance, give it a new BIOS GUID while it is off, and set `provisioning` back to `pending` if the source had finished:
+
+```powershell
+& "C:\Program Files\Proof\proof-refresher.exe" metadata new-instance-id --vm web02
+```
+
+### In the image: cloud-init
+
+`proof-metadata` starts before cloud-init, from the package. Tell cloud-init where it is, in `/etc/cloud/cloud.cfg.d/90-proof.cfg`. Listing Ec2 as the only datasource matters: `ds-identify` otherwise drops it on an unknown platform.
+
+```yaml
+datasource_list: [Ec2, None]
+datasource:
+  Ec2:
+    metadata_urls: ["http://127.0.0.1:8169"]
+    strict_id: false
+    max_wait: 60
+```
+
+`max_wait` is how long cloud-init keeps asking when it gets a 503, or a 404 under `UnsetMetadataHandler: 404`. Keep it long enough for a busy host.
+
+Have the user data report the end of provisioning with `phone_home`, as above. Leave `network` out of `meta-data` unless it has `interfaces.macs`: cloud-init then uses its fallback network configuration. The image also needs the `hv_sock` kernel module, which the package loads at boot. On Ubuntu's generic kernels it is in `linux-modules-extra`.
+
+### In the image: Cloudbase-Init
+
+In `cloudbase-init.conf`:
+
+```ini
+[DEFAULT]
+metadata_services=cloudbaseinit.metadata.services.ec2service.EC2Service
+
+[ec2]
+metadata_base_url=http://127.0.0.1:8169/
+```
+
+Cloudbase-Init has no `phone_home`, so end the user data with the report:
+
+```powershell
+#ps1_sysnative
+# ... provisioning ...
+Invoke-RestMethod -Method Post http://127.0.0.1:8169/proof/v1/provisioning/complete
+```
+
+### What any local program can do
+
+As on EC2, any program in the VM can read the API, including sensitive values until they are cleared, and can report provisioning finished. `curl http://127.0.0.1:8169/latest/meta-data/` shows the tree. A 503 means the host cannot be reached or cannot serve it, and the host's log says why. `GET /proof/v1/provisioning` shows the status, which is `none` with no block.
+
+Sensitive values are plain text in the notes until cleared, readable by anyone who may read the VM's settings. Clearing may not reach checkpoints, which hold their own copy of a VM's settings, so avoid checkpointing a VM that holds secrets. In a PowerShell session that has already read the VM, `Get-VM` can show the old notes; a new session shows what the host holds.
+
+### Checking on a real VM
+
+`installer/Test-VmNotes.ps1`, elevated, checks the notes and BIOS GUID against real Hyper-V with a throwaway VM that is never started. For the whole path, on a host with the refresher installed: add the block above to a VM with the `proof` package, then in the VM:
+
+```sh
+curl http://127.0.0.1:8169/latest/meta-data/instance-id
+curl http://127.0.0.1:8169/latest/user-data
+curl -X POST http://127.0.0.1:8169/proof/v1/provisioning/complete
+```
+
+The notes should then show `!cleared` and the status.
+
 ## Status
 
 - `Proof.Shared`: claim names, token types, host-token policy and key helpers (JWK and RFC 7638 `kid`).
 - `Proof.Issuer`: implemented. Token exchange, allowlist loading and reload, discovery, JWKS, health, rate limits and metrics (`Proof.Issuer` meter), with the section 12 negative tests.
 - `Proof.Refresher`: implemented. Host key management, host token signing, KVP writes over WMI, the refresh loop, metrics, and the `key` and `once` commands. Tested end to end on a Windows Server 2025 Hyper-V host against the issuer.
 - `Proof.Client`: implemented. KVP reads on Linux (pool files) and Windows (registry), token exchange, token files, `token` and `status`. Linux pool reading was tested against synthetic pool files with a competing fcntl lock, not yet against a real `hv_kvp_daemon`. The Windows registry path was checked on a Hyper-V guest whose host has no refresher. No exchange has run end to end on a real VM yet.
+- Instance metadata: tested end to end on Windows Server 2025 with a Debian 12 guest and cloud-init 22.4.2, with no network adapter (Design.md 16.7). Not yet tested: a Windows guest, Cloudbase-Init, a live migration, and the .deb's install scripts.
 - Packaging: both MSIs were installed, upgraded, repaired, refused a downgrade and uninstalled on Windows Server 2025, including the refresher MSI's refusals without settings or host key, and the refresher writing KVP to a VM as its virtual account. The .deb, the container image and the workflow have not run yet; CI runs them on the first push.
 
 ## License

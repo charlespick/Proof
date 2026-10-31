@@ -32,8 +32,28 @@ public sealed class KvpWriteException(string message, uint errorCode = 0) : Exce
     public uint ErrorCode { get; } = errorCode;
 }
 
+/// <summary>A VM's settings that instance metadata reads (Design.md 16).</summary>
+/// <param name="BiosGuid">The SMBIOS UUID the guest sees. Instance IDs come from it.</param>
+public sealed record VmSettings(Guid Id, string Name, Guid BiosGuid, string? Notes);
+
+/// <summary>The VM settings instance metadata reads and writes, whether or not the VM is running. Faked in tests.</summary>
+public interface IVmNotes
+{
+    /// <summary>The settings of a VM on this host, or null if it has none by that ID.</summary>
+    Task<VmSettings?> GetVmAsync(Guid vmId, CancellationToken cancellationToken);
+
+    /// <summary>Every VM on this host, running or not.</summary>
+    Task<IReadOnlyList<VmSettings>> GetVmsAsync(CancellationToken cancellationToken);
+
+    /// <summary>Replaces the VM's notes.</summary>
+    Task WriteNotesAsync(Guid vmId, string notes, CancellationToken cancellationToken);
+
+    /// <summary>Gives the VM a new BIOS GUID, and so a new instance ID. Hyper-V allows this only while the VM is off.</summary>
+    Task WriteBiosGuidAsync(Guid vmId, Guid biosGuid, CancellationToken cancellationToken);
+}
+
 /// <summary>
-/// <see cref="IHyperVHost"/> over the Hyper-V WMI provider (<c>root\virtualization\v2</c>).
+/// <see cref="IHyperVHost"/> and <see cref="IVmNotes"/> over the Hyper-V WMI provider (<c>root\virtualization\v2</c>).
 /// </summary>
 /// <remarks>
 /// Measured on Windows Server 2025 (Design.md 6.2): <c>ModifyKvpItems</c> fails with 32779 (not found) for a missing key, and
@@ -42,9 +62,12 @@ public sealed class KvpWriteException(string message, uint errorCode = 0) : Exce
 /// the guest sees the item once both are.
 /// </remarks>
 [SupportedOSPlatform("windows")]
-public sealed class WmiHyperVHost : IHyperVHost
+public sealed class WmiHyperVHost : IHyperVHost, IVmNotes
 {
     private const string Namespace = @"\\.\root\virtualization\v2";
+
+    // A VM's current settings, as opposed to those of its checkpoints.
+    private const string RealizedSettings = "VirtualSystemType = 'Microsoft:Hyper-V:System:Realized'";
 
     // Msvm_ComputerSystem.EnabledState and the method and job codes in the Hyper-V WMI documentation.
     private const ushort EnabledStateEnabled = 2;
@@ -106,6 +129,86 @@ public sealed class WmiHyperVHost : IHyperVHost
         if (result.Code != ReturnCompleted)
         {
             throw new KvpWriteException(result.Message ?? $"KVP write failed with error {result.Code}.", result.Code);
+        }
+    }
+
+    public Task<VmSettings?> GetVmAsync(Guid vmId, CancellationToken cancellationToken)
+    {
+        var scope = Connect();
+        // The ID is a Guid, so it is safe to put in the query.
+        using var searcher = new ManagementObjectSearcher(
+            scope, new ObjectQuery($"SELECT * FROM Msvm_VirtualSystemSettingData WHERE VirtualSystemIdentifier = '{vmId:D}' AND {RealizedSettings}"));
+        using var results = searcher.Get();
+        return Task.FromResult(results.Cast<ManagementObject>().Select(ReadSettings).OfType<VmSettings>().FirstOrDefault());
+    }
+
+    public Task<IReadOnlyList<VmSettings>> GetVmsAsync(CancellationToken cancellationToken)
+    {
+        var scope = Connect();
+        using var searcher = new ManagementObjectSearcher(
+            scope, new ObjectQuery($"SELECT * FROM Msvm_VirtualSystemSettingData WHERE {RealizedSettings}"));
+        using var results = searcher.Get();
+        return Task.FromResult<IReadOnlyList<VmSettings>>(results.Cast<ManagementObject>().Select(ReadSettings).OfType<VmSettings>().ToList());
+    }
+
+    public Task WriteNotesAsync(Guid vmId, string notes, CancellationToken cancellationToken) =>
+        ModifySettingsAsync(vmId, s => s["Notes"] = new[] { notes }, cancellationToken);
+
+    public Task WriteBiosGuidAsync(Guid vmId, Guid biosGuid, CancellationToken cancellationToken) =>
+        ModifySettingsAsync(vmId, s => s["BIOSGUID"] = biosGuid.ToString("B").ToUpperInvariant(), cancellationToken);
+
+    private static VmSettings? ReadSettings(ManagementObject settings)
+    {
+        using (settings)
+        {
+            return Guid.TryParse(settings["VirtualSystemIdentifier"] as string, out var id)
+                && Guid.TryParse(settings["BIOSGUID"] as string, out var biosGuid)
+                ? new VmSettings(
+                    id,
+                    settings["ElementName"] as string ?? "",
+                    biosGuid,
+                    // An array, though Hyper-V's own tools write one element holding the whole text.
+                    settings["Notes"] is string[] notes ? string.Join("\r\n", notes) : null)
+                : null;
+        }
+    }
+
+    /// <summary>
+    /// The settings in the text form the method takes, with the notes as written. Left to itself GetText emits a bare
+    /// CR, which the provider's XML parser drops, so a change to any setting would turn the CRLF of Hyper-V Manager's
+    /// notes into LF, which its text box shows as one line. It also switches to CDATA when the text holds markup, so
+    /// its output cannot be patched afterwards; instead a placeholder goes through it and the notes replace that.
+    /// </summary>
+    private static string SettingsText(ManagementObject settings)
+    {
+        if (settings["Notes"] is not string[] notes)
+        {
+            return settings.GetText(TextFormat.WmiDtd20);
+        }
+
+        var placeholder = Guid.NewGuid().ToString("N");
+        settings["Notes"] = new[] { placeholder };
+        return settings.GetText(TextFormat.WmiDtd20).Replace(placeholder, EscapeForWmiText(string.Join("\r\n", notes)));
+    }
+
+    /// <summary>A string as XML text that reads back exactly, line ends included.</summary>
+    public static string EscapeForWmiText(string value) =>
+        System.Security.SecurityElement.Escape(value).Replace("\r", "&#13;");
+
+    private static async Task ModifySettingsAsync(Guid vmId, Action<ManagementObject> change, CancellationToken cancellationToken)
+    {
+        var scope = Connect();
+        using var service = GetSingle(scope, "SELECT * FROM Msvm_VirtualSystemManagementService");
+        using var settings = GetSingle(scope, $"SELECT * FROM Msvm_VirtualSystemSettingData WHERE VirtualSystemIdentifier = '{vmId:D}' AND {RealizedSettings}");
+        change(settings);
+
+        using var inParams = service.GetMethodParameters("ModifySystemSettings");
+        inParams["SystemSettings"] = SettingsText(settings);
+        using var outParams = service.InvokeMethod("ModifySystemSettings", inParams, null);
+        var result = await FinishAsync(scope, "ModifySystemSettings", outParams, cancellationToken);
+        if (result.Code != ReturnCompleted)
+        {
+            throw new KvpWriteException(result.Message ?? $"ModifySystemSettings failed with error {result.Code}.", result.Code);
         }
     }
 
@@ -248,6 +351,13 @@ public sealed class WmiHyperVHost : IHyperVHost
         inParams["TargetSystem"] = system.Path.Path;
         inParams["DataItems"] = new[] { item };
         using var outParams = service.InvokeMethod(method, inParams, null);
+        return await FinishAsync(scope, method, outParams, cancellationToken);
+    }
+
+    /// <summary>Waits for the job a method started, if it started one. Returns 0 on success, or the Hyper-V error code and its description.</summary>
+    private static async Task<(uint Code, string? Message)> FinishAsync(
+        ManagementScope scope, string method, ManagementBaseObject outParams, CancellationToken cancellationToken)
+    {
         var returnValue = (uint)outParams["ReturnValue"];
         if (returnValue != ReturnJobStarted)
         {

@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Principal;
+using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
+using Proof.Shared;
 
 namespace Proof.Refresher;
 
@@ -22,6 +24,8 @@ public static class ServiceAccess
 
     /// <summary>BUILTIN\Hyper-V Administrators, whose name is localized.</summary>
     private static readonly SecurityIdentifier HyperVAdministrators = new("S-1-5-32-578");
+
+    private const string GuestCommunicationServices = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices";
 
     private const int ErrorMemberNotInAlias = 1377;
     private const int ErrorMemberInAlias = 1378;
@@ -74,6 +78,40 @@ public static class ServiceAccess
     /// <summary>Removes the account from Hyper-V Administrators. Returns false if it was not a member.</summary>
     public static bool RemoveFromHyperVAdministrators(SecurityIdentifier account) =>
         ChangeMembership(account, add: false);
+
+    /// <summary>
+    /// Registers the instance metadata service with Hyper-V, which it requires before a VM may connect to it.
+    /// Returns false if it was already registered.
+    /// </summary>
+    public static bool RegisterMetadataSocket()
+    {
+        using var services = Registry.LocalMachine.CreateSubKey(GuestCommunicationServices);
+        var name = MetadataService.ServiceId.ToString("D");
+        if (services.OpenSubKey(name) is { } existing)
+        {
+            existing.Dispose();
+            return false;
+        }
+
+        using var service = services.CreateSubKey(name);
+        service.SetValue("ElementName", MetadataService.ServiceName);
+        return true;
+    }
+
+    /// <summary>Undoes <see cref="RegisterMetadataSocket"/>. Returns false if it was not registered.</summary>
+    public static bool UnregisterMetadataSocket()
+    {
+        using var services = Registry.LocalMachine.OpenSubKey(GuestCommunicationServices, writable: true);
+        var name = MetadataService.ServiceId.ToString("D");
+        if (services?.OpenSubKey(name) is not { } existing)
+        {
+            return false;
+        }
+
+        existing.Dispose();
+        services.DeleteSubKey(name);
+        return true;
+    }
 
     /// <summary>Registers the service's event log source in the Application log. Returns false if it exists.</summary>
     public static bool EnsureEventSource()
