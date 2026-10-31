@@ -300,6 +300,9 @@ public class MetadataHostTests
     [Fact]
     public void EndPointHasTheLayoutOfSockaddrHv()
     {
+        // Linux has no AF_HYPERV, and SocketAddress refuses a family it does not know. Guests there use AF_VSOCK.
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "AF_HYPERV.");
+
         var (vm, service) = (Guid.NewGuid(), Guid.NewGuid());
         var address = new HyperVEndPoint(vm, service).Serialize();
         Assert.Equal(36, address.Size);
