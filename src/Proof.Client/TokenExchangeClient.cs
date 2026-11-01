@@ -20,7 +20,7 @@ public sealed class TokenExchangeException(string message, string? error = null)
     public string? Error { get; } = error;
 }
 
-/// <summary>Trades a host token for an audience-specific JWT at the issuer's <c>/token</c> (RFC 8693, Design.md 6.3).</summary>
+/// <summary>Trades a host token for an audience-specific JWT at the issuer's <c>/token</c> (RFC 8693).</summary>
 public sealed class TokenExchangeClient(HttpClient http, Uri endpoint)
 {
     /// <summary>Responses larger than this are refused. An issued JWT is well under 2 KB.</summary>

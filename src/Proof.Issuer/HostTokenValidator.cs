@@ -44,7 +44,7 @@ public sealed record HostTokenResult(HostIdentity? Identity, HostTokenFailure Fa
 }
 
 /// <summary>
-/// Checks a host token in the order Design.md 6.3 sets out. Microsoft.IdentityModel does the signature,
+/// Checks a host token in a fixed order. Microsoft.IdentityModel does the signature,
 /// issuer, audience, type, algorithm and expiry checks; this class adds the policy the library has no setting for.
 /// </summary>
 /// <remarks>

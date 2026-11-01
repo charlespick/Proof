@@ -9,7 +9,7 @@ namespace Proof.Shared;
 
 /// <summary>
 /// The Hyper-V socket service between <c>proof-metadata</c> in a VM and <c>proof-refresher</c> on its host
-/// (Design.md 16). The hypervisor names the calling VM to the host, so a request carries no identity.
+///. The hypervisor names the calling VM to the host, so a request carries no identity.
 /// </summary>
 public static class MetadataService
 {

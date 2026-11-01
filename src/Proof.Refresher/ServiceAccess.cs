@@ -10,7 +10,7 @@ namespace Proof.Refresher;
 
 /// <summary>
 /// What the service's virtual account, <c>NT SERVICE\proof-refresher</c>, needs beyond an ordinary account
-/// (Design.md 8): membership of Hyper-V Administrators for the WMI KVP methods and VM events, read on the host key,
+///: membership of Hyper-V Administrators for the WMI KVP methods and VM events, read on the host key,
 /// and an event log source registered for it, since only an administrator can register one. The MSI switches the
 /// service to the account and grants these after it installs the service, and revokes the group membership when it
 /// removes it.

@@ -415,7 +415,7 @@ internal static class Commands
         return options;
     }
 
-    /// <summary>The allowlist entry for this host (Design.md 7.2), on stdout so it can be piped into a pull request.</summary>
+    /// <summary>The allowlist entry for this host, on stdout so it can be piped into a pull request.</summary>
     private static void PrintEntry(RefresherOptions options, ECDsa key)
     {
         var jwk = Proof.Shared.ProofKeys.CreatePublicJwk(key);

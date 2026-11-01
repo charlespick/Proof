@@ -10,7 +10,7 @@ public sealed record RefreshPass(int Running, int Written, int Failed, IReadOnly
 public sealed record VmWriteResult(VirtualMachine Vm, string? Jti, DateTimeOffset? Expires, bool VmNameOmitted, string? Error);
 
 /// <summary>
-/// One refresh pass: find the running VMs and write a new host token to each one that is due (Design.md 6.1, 6.2).
+/// One refresh pass: find the running VMs and write a new host token to each one that is due.
 /// A VM is due when this process has not yet written to it (it just started or migrated in), or its last
 /// successful write is about <see cref="HostTokenPolicy.RefreshInterval"/> old. A failed write is retried on the next pass.
 /// </summary>

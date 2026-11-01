@@ -11,7 +11,7 @@ namespace Proof.Issuer.Allowlist;
 public sealed class AllowlistException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
-/// Parses and validates the host allowlist (Design.md 7.2). Any problem fails the whole file, so the monitor
+/// Parses and validates the host allowlist. Any problem fails the whole file, so the monitor
 /// keeps the previous list. Unknown fields are errors, so a typo cannot silently drop a check.
 /// </summary>
 public static class AllowlistParser

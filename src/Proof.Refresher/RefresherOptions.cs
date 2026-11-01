@@ -27,7 +27,7 @@ public sealed class RefresherOptions
     /// </summary>
     public TimeSpan ScanInterval { get; set; } = HostTokenPolicy.RefreshInterval;
 
-    /// <summary>Serve instance metadata to VMs from their notes (Design.md 16). Off, no socket is opened.</summary>
+    /// <summary>Serve instance metadata to VMs from their notes. Off, no socket is opened.</summary>
     public bool MetadataEnabled { get; set; } = true;
 
     /// <summary>

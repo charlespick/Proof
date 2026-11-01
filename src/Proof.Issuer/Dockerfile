@@ -5,7 +5,7 @@
 #   docker build -f src/Proof.Issuer/Dockerfile --build-arg VERSION=1.2.3 .
 #
 # Runs as a non-root user on a chiseled (shell-less) ASP.NET image, listening for HTTP on 8080. Settings come from
-# Proof__* environment variables; the allowlist and signing key are mounted at the paths set below. See README.md.
+# Proof__* environment variables; the allowlist and signing key are mounted at the paths set below. See docs/issuer.md.
 
 # The SDK stage runs on the build machine and cross-compiles, so a multi-platform build needs no emulation.
 # The SDK global.json pins: its bundled packages (ILLink) are in the lock files.

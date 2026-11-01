@@ -9,7 +9,7 @@ namespace Proof.Client;
 public sealed class ClientConfigException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
-/// The client's settings: a small JSON file baked into the image (Design.md 9). The issuer URL is configured, never
+/// The client's settings: a small JSON file baked into the image. The issuer URL is configured, never
 /// learned from KVP.
 /// </summary>
 public sealed class ClientOptions

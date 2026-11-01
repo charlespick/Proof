@@ -10,7 +10,7 @@ namespace Proof.Refresher.Metadata;
 public sealed class VmMetadataException(string message) : Exception(message);
 
 /// <summary>
-/// A VM's instance metadata: YAML in its Hyper-V notes between two marker lines (Design.md 16.2). Everything
+/// A VM's instance metadata: YAML in its Hyper-V notes between two marker lines. Everything
 /// outside the markers belongs to the operator and is never read, served or changed.
 /// </summary>
 public sealed class VmMetadataBlock

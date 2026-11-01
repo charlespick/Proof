@@ -5,7 +5,7 @@ using Proof.Shared;
 namespace Proof.Issuer;
 
 /// <summary>
-/// <c>POST /token</c>: RFC 8693 token exchange (Design.md 6.3). The signed host token is the only credential.
+/// <c>POST /token</c>: RFC 8693 token exchange. The signed host token is the only credential.
 /// Callers get a generic error; the reason goes to the log.
 /// </summary>
 public static class TokenEndpoint
@@ -140,7 +140,7 @@ public static class TokenEndpoint
 
     private sealed record ErrorResponse(string Error, string ErrorDescription);
 
-    /// <summary>One structured log line per exchange (Design.md 8). Never tokens, keys or claim sets.</summary>
+    /// <summary>One structured log line per exchange. Never tokens, keys or claim sets.</summary>
     private sealed class ExchangeLog(ILogger logger, IssuerMetrics metrics, HttpContext http)
     {
         public string? Audience { get; set; }

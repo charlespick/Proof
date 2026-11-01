@@ -17,7 +17,7 @@ public interface IKvpReader
 
     /// <summary>
     /// The parameters Hyper-V pushes to every guest, such as <c>VirtualMachineId</c>, <c>VirtualMachineName</c>
-    /// and <c>PhysicalHostName</c>. Empty if they cannot be read. Not trusted: for troubleshooting only (Design.md 6.2).
+    /// and <c>PhysicalHostName</c>. Empty if they cannot be read. Not trusted: for troubleshooting only.
     /// </summary>
     IReadOnlyDictionary<string, string> ReadGuestParameters();
 

@@ -32,7 +32,7 @@ public sealed class KvpWriteException(string message, uint errorCode = 0) : Exce
     public uint ErrorCode { get; } = errorCode;
 }
 
-/// <summary>A VM's settings that instance metadata reads (Design.md 16).</summary>
+/// <summary>A VM's settings that instance metadata reads.</summary>
 /// <param name="BiosGuid">The SMBIOS UUID the guest sees. Instance IDs come from it.</param>
 public sealed record VmSettings(Guid Id, string Name, Guid BiosGuid, string? Notes);
 
@@ -56,9 +56,9 @@ public interface IVmNotes
 /// <see cref="IHyperVHost"/> and <see cref="IVmNotes"/> over the Hyper-V WMI provider (<c>root\virtualization\v2</c>).
 /// </summary>
 /// <remarks>
-/// Measured on Windows Server 2025 (Design.md 6.2): <c>ModifyKvpItems</c> fails with 32779 (not found) for a missing key, and
+/// Measured on Windows Server 2025: <c>ModifyKvpItems</c> fails with 32779 (not found) for a missing key, and
 /// <c>AddKvpItems</c> fails with 32773 (invalid parameter) for an existing one, so an upsert is Modify, then Add
-/// (Design.md 6.2). Both work whether or not the VM is running and whether or not its Data Exchange service is on;
+///. Both work whether or not the VM is running and whether or not its Data Exchange service is on;
 /// the guest sees the item once both are.
 /// </remarks>
 [SupportedOSPlatform("windows")]

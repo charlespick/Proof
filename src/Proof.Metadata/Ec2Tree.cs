@@ -12,7 +12,7 @@ public abstract record Ec2Node
 }
 
 /// <summary>
-/// The EC2 instance metadata tree over a VM's meta-data (Design.md 16.4): a directory lists its children one per line,
+/// The EC2 instance metadata tree over a VM's meta-data: a directory lists its children one per line,
 /// with a trailing <c>/</c> on those that are directories themselves.
 /// </summary>
 public static class Ec2Tree

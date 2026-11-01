@@ -3,13 +3,13 @@ using Proof.Shared;
 
 namespace Proof.Issuer;
 
-/// <summary>The OIDC discovery document and JWKS (Design.md 6.5).</summary>
+/// <summary>The OIDC discovery document and JWKS.</summary>
 public static class DiscoveryEndpoints
 {
     public const string DiscoveryPath = "/.well-known/openid-configuration";
     public const string JwksPath = "/.well-known/jwks.json";
 
-    /// <summary>Short, so a rotation reaches verifiers quickly (Design.md 7.3).</summary>
+    /// <summary>Short, so a rotation reaches verifiers quickly.</summary>
     private const string CacheControl = "public, max-age=300";
 
     public static IEndpointRouteBuilder MapDiscovery(this IEndpointRouteBuilder app)

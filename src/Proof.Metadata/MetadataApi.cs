@@ -10,7 +10,7 @@ using Proof.Shared;
 namespace Proof.Metadata;
 
 /// <summary>
-/// The local HTTP API (Design.md 16.4): EC2's instance metadata paths for cloud-init and Cloudbase-Init, plus
+/// The local HTTP API: EC2's instance metadata paths for cloud-init and Cloudbase-Init, plus
 /// <c>/proof/v1/provisioning</c> to report the end of provisioning, all translated to requests to the host.
 /// </summary>
 public sealed partial class MetadataApi(IHostChannel host, TimeProvider time, ILogger<MetadataApi> logger)

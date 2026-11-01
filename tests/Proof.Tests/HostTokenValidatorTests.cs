@@ -8,7 +8,7 @@ using Proof.Tests.Support;
 
 namespace Proof.Tests;
 
-/// <summary>Design.md section 12 negative tests for host tokens. Each bad token must be refused.</summary>
+/// <summary>Negative tests for host tokens. Each bad token must be refused.</summary>
 public sealed class HostTokenValidatorTests : IDisposable
 {
     private readonly TestHost host = new();

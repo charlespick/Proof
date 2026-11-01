@@ -48,7 +48,7 @@ public static class HostKeyStore
 
     /// <summary>
     /// Creates a new non-exportable host key. Refuses to replace an existing key: a replaced key is a new
-    /// allowlist entry (Design.md 7.3), so rotation uses a new name.
+    /// allowlist entry, so rotation uses a new name.
     /// </summary>
     /// <param name="grantRead">
     /// Accounts besides SYSTEM and Administrators that may sign with the key, such as the service's virtual

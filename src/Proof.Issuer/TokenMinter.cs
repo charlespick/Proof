@@ -5,7 +5,7 @@ using Proof.Shared;
 
 namespace Proof.Issuer;
 
-/// <summary>Mints the audience-specific JWT described in Design.md 6.4.</summary>
+/// <summary>Mints the audience-specific JWT.</summary>
 public sealed class TokenMinter(SigningKeys keys, IOptions<IssuerOptions> options, TimeProvider time)
 {
     private readonly JsonWebTokenHandler handler = new() { SetDefaultTimesOnTokenCreation = false };

@@ -10,7 +10,7 @@ public sealed class IssuerOptions
 {
     public const string SectionName = "Proof";
 
-    /// <summary>The longest issued-token lifetime the design allows (Design.md 6.4).</summary>
+    /// <summary>The longest issued-token lifetime the design allows.</summary>
     public static readonly TimeSpan MaxIssuedTokenLifetime = TimeSpan.FromMinutes(10);
 
     /// <summary>

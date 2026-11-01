@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   Needs an elevated session on a machine with Hyper-V. It creates one VM with no disk, never starts it, and removes it
-  afterwards. It touches no other VM. It does not exercise a guest: see "Checking on a real VM" in README.md.
+  afterwards. It touches no other VM. It does not exercise a guest: see the instance metadata sections of docs/refresher.md and docs/client.md.
 
 .EXAMPLE
   dotnet publish src/Proof.Refresher -c Release -r win-x64 -o publish\refresher

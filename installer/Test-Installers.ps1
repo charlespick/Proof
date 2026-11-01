@@ -81,7 +81,7 @@ try {
     Check (-not (Test-Path "$installDir\proof-refresher.exe")) '...and no files'
     Check (-not (Test-InHyperVAdministrators)) '...and takes the account back out of Hyper-V Administrators'
 
-    # The key as configuration management would create it before installing (README.md).
+    # The key as configuration management would create it before installing (docs/refresher.md).
     $parameters = [System.Security.Cryptography.CngKeyCreationParameters]::new()
     $parameters.Provider = $ksp
     $parameters.KeyCreationOptions = [System.Security.Cryptography.CngKeyCreationOptions]::MachineKey

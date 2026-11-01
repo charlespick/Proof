@@ -14,7 +14,7 @@ public sealed record VirtualMachine(string Id, string Name);
 /// <summary>A signed host token and whether <c>vm_name</c> had to be left out to fit in one KVP value.</summary>
 public sealed record SignedHostToken(string Token, string Jti, DateTimeOffset Expires, bool VmNameOmitted);
 
-/// <summary>Signs host tokens (Design.md 6.1) with the host key. Microsoft.IdentityModel builds and signs the JWS.</summary>
+/// <summary>Signs host tokens with the host key. Microsoft.IdentityModel builds and signs the JWS.</summary>
 public sealed class HostTokenSigner
 {
     private readonly JsonWebTokenHandler handler = new() { SetDefaultTimesOnTokenCreation = false };

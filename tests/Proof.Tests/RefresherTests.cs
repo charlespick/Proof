@@ -97,7 +97,7 @@ public sealed class RefresherTests : IDisposable
     [Fact]
     public void TypicalTokenFitsWellInsideKvpLimit()
     {
-        // Design.md 6.1 estimated 500 to 550 characters. Measured here with a realistic issuer URL and names.
+        // Expected to be 500 to 550 characters. Measured here with a realistic issuer URL and names.
         var s = CreateSigner(new RefresherOptions { IssuerUrl = "https://id.corp.example", HostId = "hv-host-01", Cluster = "prod" });
         var token = s.Sign(Web01, DateTimeOffset.UtcNow).Token;
 

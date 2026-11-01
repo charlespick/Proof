@@ -8,7 +8,7 @@ public static class ExitCodes
     public const int Failed = 1;
     public const int Usage = 2;
 
-    /// <summary>The host has not written a token into this VM. Callers should retry later (Design.md 9).</summary>
+    /// <summary>The host has not written a token into this VM. Callers should retry later.</summary>
     public const int NoHostToken = 3;
 }
 

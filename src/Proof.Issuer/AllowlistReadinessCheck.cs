@@ -3,7 +3,7 @@ using Proof.Issuer.Allowlist;
 
 namespace Proof.Issuer;
 
-/// <summary>A pod is ready only once an allowlist has loaded (Design.md 8).</summary>
+/// <summary>A pod is ready only once an allowlist has loaded.</summary>
 public sealed class AllowlistReadinessCheck(AllowlistMonitor monitor) : IHealthCheck
 {
     public Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default)

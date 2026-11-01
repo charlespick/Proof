@@ -5,7 +5,7 @@ using Proof.Shared;
 namespace Proof.Refresher.Metadata;
 
 /// <summary>
-/// Answers guests' requests from their VMs' notes (Design.md 16). The VM ID comes from the hypervisor through the
+/// Answers guests' requests from their VMs' notes. The VM ID comes from the hypervisor through the
 /// socket, so a guest can only ever reach its own notes, and no text a guest sends is written to them.
 /// </summary>
 public sealed partial class MetadataRequestHandler(
@@ -107,7 +107,7 @@ public sealed partial class MetadataRequestHandler(
     }
 
     /// <summary>
-    /// The instance ID is the VM's BIOS GUID (Design.md 16.3). A copy that keeps it is the same instance to cloud-init;
+    /// The instance ID is the VM's BIOS GUID. A copy that keeps it is the same instance to cloud-init;
     /// a copy given a new one is provisioned as a new instance.
     /// </summary>
     public static string InstanceIdFor(Guid biosGuid) => $"i-{biosGuid:N}";

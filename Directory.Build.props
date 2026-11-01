@@ -1,7 +1,7 @@
 <Project>
 
   <PropertyGroup>
-    <!-- Pin every resolved NuGet version (Design.md section 11, supply chain). -->
+    <!-- Pin every resolved NuGet version. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <!-- CI restores exactly what the lock files say, and fails if they are out of date. -->
     <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>

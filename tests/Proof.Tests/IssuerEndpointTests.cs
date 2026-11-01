@@ -105,7 +105,7 @@ public sealed class IssuerEndpointTests : IDisposable
         var exchange = await ReadJsonAsync(await PostAsync(ExchangeForm(host.CreateToken())));
         var issued = exchange.GetProperty("access_token").GetString()!;
 
-        // A consumer's view (Design.md 6.6): discovery, then the JWKS it names, then standard validation.
+        // A consumer's view: discovery, then the JWKS it names, then standard validation.
         var discovery = await ReadJsonAsync(await client.GetAsync(DiscoveryEndpoints.DiscoveryPath, TestContext.Current.CancellationToken));
         var jwksPath = new Uri(discovery.GetProperty("jwks_uri").GetString()!).AbsolutePath;
         var jwksJson = await client.GetStringAsync(jwksPath, TestContext.Current.CancellationToken);

@@ -3,7 +3,7 @@
 #
 #   packaging/debian/build-deb.sh <publish dir> <deb version> <deb arch> <output dir>
 #
-# The publish dir holds the self-contained single files proof and proof-metadata (see README.md). The deb version is ProofDebVersion
+# The publish dir holds the self-contained single files proof and proof-metadata (see CONTRIBUTING.md). The deb version is ProofDebVersion
 # from build/Version.proj, where a prerelease's - is already ~ so it sorts below its release.
 set -euo pipefail
 

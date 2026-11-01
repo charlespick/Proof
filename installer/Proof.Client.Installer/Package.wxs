@@ -4,9 +4,9 @@
     For Windows VM images: msiexec /i proof.msi /qn. It has no properties and no dialogs.
 
     The proof command: it puts the install folder on the machine PATH, and does not write
-    %ProgramData%\Proof\config.json, which belongs to the image (Design.md 9).
+    %ProgramData%\Proof\config.json, which belongs to the image.
 
-    The proof-metadata service: serves instance metadata on 127.0.0.1 (Design.md 16). It needs no settings, starts
+    The proof-metadata service: serves instance metadata on 127.0.0.1. It needs no settings, starts
     whether or not the host serves metadata, and runs as Local Service, since it needs only loopback and the Hyper-V
     socket. Local Service cannot register an event log source, so the MSI does.
   -->

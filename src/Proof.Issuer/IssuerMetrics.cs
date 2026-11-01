@@ -2,7 +2,7 @@ using System.Diagnostics.Metrics;
 
 namespace Proof.Issuer;
 
-/// <summary>Counters for Design.md section 8 monitoring. Exported by whatever metrics pipeline the host wires up.</summary>
+/// <summary>Counters for monitoring. Exported by whatever metrics pipeline the host wires up.</summary>
 public sealed class IssuerMetrics
 {
     public const string MeterName = "Proof.Issuer";
