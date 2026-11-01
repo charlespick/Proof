@@ -5,8 +5,8 @@
 
 .DESCRIPTION
   Needs an elevated session on a machine with Hyper-V. It changes the machine while it runs: it creates and deletes
-  a test host key, %ProgramData%\Proof\refresher.json and the proof-refresher service, adds and removes
-  NT SERVICE\proof-refresher in Hyper-V Administrators, and installs the service where any running VM would get
+  a test host key, %ProgramData%\Proof\refresher.json and the proof-refresher and proof-metadata-host services, adds
+  and removes their accounts in Hyper-V Administrators, and installs the services where any running VM would get
   test tokens. CI runs it on a throwaway runner. It refuses to start if Proof is already installed or
   configured here, and removes only what it created.
 
@@ -46,19 +46,21 @@ function Invoke-Msi([string] $operation, [string] $msi, [string] $log) {
     $p.ExitCode
 }
 
-function Test-ServiceInstalled { [bool](Get-Service proof-refresher -ErrorAction SilentlyContinue) }
+function Test-ServiceInstalled { [bool](Get-Service proof-refresher, proof-metadata-host -ErrorAction SilentlyContinue) }
 
-# The service's SID is derived from its name, so it can be checked for before and after the service exists.
-$serviceSid = ((sc.exe showsid proof-refresher) -match 'SERVICE SID' -split ':\s*')[-1].Trim()
+# A service's SID is derived from its name, so it can be checked for before and after the service exists.
+function Get-ServiceSid([string] $name) { ((sc.exe showsid $name) -match 'SERVICE SID' -split ':\s*')[-1].Trim() }
+$serviceSid = Get-ServiceSid proof-refresher
+$metadataServiceSid = Get-ServiceSid proof-metadata-host
 
 # By SID through ADSI: Get-LocalGroupMember fails on a member whose SID no longer resolves, which is exactly what a
 # membership left behind by a removed service looks like.
-function Test-InHyperVAdministrators {
+function Test-InHyperVAdministrators([string] $sid = $serviceSid) {
     $group = ([System.Security.Principal.SecurityIdentifier]'S-1-5-32-578').Translate([System.Security.Principal.NTAccount]).Value.Split('\')[-1]
     $members = @(([ADSI]"WinNT://./$group,group").Invoke('Members')) | ForEach-Object {
         (New-Object System.Security.Principal.SecurityIdentifier($_.GetType().InvokeMember('objectSid', 'GetProperty', $null, $_, $null), 0)).Value
     }
-    $members -contains $serviceSid
+    $members -contains $sid
 }
 function Test-OnMachinePath { [bool](([Environment]::GetEnvironmentVariable('PATH', 'Machine') -split ';') -contains "$installDir\") }
 
@@ -67,6 +69,7 @@ Check (-not (Test-Path $installDir)) "$installDir does not exist yet"
 Check (-not (Test-Path $settingsFile)) "$settingsFile does not exist yet"
 Check (-not [System.Security.Cryptography.CngKey]::Exists($keyName, $ksp, $machineKey)) "host key '$keyName' does not exist yet"
 Check (-not (Test-InHyperVAdministrators)) 'NT SERVICE\proof-refresher is not in Hyper-V Administrators yet'
+Check (-not (Test-InHyperVAdministrators $metadataServiceSid)) 'NT SERVICE\proof-metadata-host is not in Hyper-V Administrators yet'
 
 $createdSettingsDir = -not (Test-Path $settingsDir)
 try {
@@ -80,6 +83,7 @@ try {
     Check (-not (Test-ServiceInstalled)) '...and leaves no service'
     Check (-not (Test-Path "$installDir\proof-refresher.exe")) '...and no files'
     Check (-not (Test-InHyperVAdministrators)) '...and takes the account back out of Hyper-V Administrators'
+    Check (-not (Test-InHyperVAdministrators $metadataServiceSid)) '...and the metadata service account too'
 
     # The key as configuration management would create it before installing (docs/refresher.md).
     $parameters = [System.Security.Cryptography.CngKeyCreationParameters]::new()
@@ -98,12 +102,20 @@ try {
     Check (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\50524f46-facb-11e6-bd58-64006a7986d3') '...and the instance metadata socket is registered with Hyper-V'
     $access = & "$installDir\proof-refresher.exe" key show 2>&1 | Out-String
     Check ($access -match 'NT SERVICE\\proof-refresher: read') '...and may use the host key'
+    $metadataHost = Get-CimInstance Win32_Service -Filter "Name='proof-metadata-host'"
+    Check ($metadataHost.State -eq 'Running') 'the proof-metadata-host service is running'
+    Check ($metadataHost.StartMode -eq 'Auto') '...and starts automatically'
+    Check ($metadataHost.StartName -eq 'NT SERVICE\proof-metadata-host') "...as NT SERVICE\proof-metadata-host (got $($metadataHost.StartName))"
+    Check (Test-InHyperVAdministrators $metadataServiceSid) '...which is in Hyper-V Administrators'
+    Check ($access -notmatch 'proof-metadata-host') '...and may not use the host key'
 
     # A repair runs the grant again, which is how a new host key gets granted.
     & "$installDir\proof-refresher.exe" service revoke 2>&1 | Out-Null
     Check ((Invoke-Msi '/fa' $RefresherMsi 'refresher-repair') -eq 0) 'a repair succeeds'
     Check (Test-InHyperVAdministrators) '...and puts the account back in Hyper-V Administrators'
+    Check (Test-InHyperVAdministrators $metadataServiceSid) '...and the metadata service account too'
     Check ((Get-Service proof-refresher).Status -eq 'Running') '...and the service is running'
+    Check ((Get-Service proof-metadata-host).Status -eq 'Running') '...and the metadata service too'
     # Settings an ordinary user could change are refused. The grant is explicit, so removing it leaves the inherited access.
     icacls $settingsFile /grant '*S-1-5-32-545:(M)' | Out-Null
     $refused = & "$installDir\proof-refresher.exe" key show 2>&1 | Out-String
@@ -139,6 +151,7 @@ try {
     Check (-not (Test-ServiceInstalled)) '...and removes the service'
     Check (-not (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\50524f46-facb-11e6-bd58-64006a7986d3')) '...and unregisters the instance metadata socket'
     Check (-not (Test-InHyperVAdministrators)) '...and takes the account out of Hyper-V Administrators'
+    Check (-not (Test-InHyperVAdministrators $metadataServiceSid)) '...and the metadata service account too'
     Check (Test-Path "$installDir\LICENSE.txt") '...and leaves the license the client still uses'
     Check ([System.Security.Cryptography.CngKey]::Exists($keyName, $ksp, $machineKey)) '...and leaves the host key'
 

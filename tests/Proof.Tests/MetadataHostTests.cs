@@ -289,6 +289,110 @@ public class MetadataHostTests
     }
 
     [Fact]
+    public void OneVmCannotHoldMoreThanItsShareOfConnections()
+    {
+        var gate = new ConnectionGate(TimeProvider.System);
+        var (noisy, quiet) = (Guid.NewGuid(), Guid.NewGuid());
+        for (var i = 0; i < ConnectionGate.MaxConnectionsPerVm; i++)
+        {
+            Assert.True(gate.TryEnter(noisy));
+        }
+
+        Assert.False(gate.TryEnter(noisy));
+        Assert.True(gate.TryEnter(quiet));
+
+        gate.Leave(noisy);
+        Assert.True(gate.TryEnter(noisy));
+    }
+
+    [Fact]
+    public void ConnectionsAreLimitedAcrossVms()
+    {
+        var gate = new ConnectionGate(TimeProvider.System);
+        var last = Guid.Empty;
+        for (var i = 0; i < ConnectionGate.MaxConnections; i++)
+        {
+            last = Guid.NewGuid();
+            Assert.True(gate.TryEnter(last));
+        }
+
+        Assert.False(gate.TryEnter(Guid.NewGuid()));
+
+        gate.Leave(last);
+        Assert.True(gate.TryEnter(Guid.NewGuid()));
+    }
+
+    [Fact]
+    public void ConnectionsCountAgainstTheRateLimitWhenTheyArrive()
+    {
+        var time = new ManualTime(new DateTimeOffset(2026, 10, 31, 0, 0, 0, TimeSpan.Zero));
+        var gate = new ConnectionGate(time);
+        var vm = Guid.NewGuid();
+        for (var i = 0; i < VmRateLimiter.MaxRequests; i++)
+        {
+            Assert.True(gate.TryEnter(vm));
+            gate.Leave(vm);
+        }
+
+        Assert.False(gate.TryEnter(vm));
+        time.Advance(VmRateLimiter.Window);
+        Assert.True(gate.TryEnter(vm));
+    }
+
+    [Fact]
+    public async Task AStalledRequestIsCutOffByItsOwnDeadline()
+    {
+        var server = new MetadataServer(
+            handler,
+            Options.Create(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl }),
+            new HurriedTime(),
+            NullLogger<MetadataServer>.Instance);
+
+        // The caller's token never fires, so only the request's deadline can end this.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            server.HandleConnectionAsync(new StalledStream(), Guid.NewGuid(), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30)));
+    }
+
+    [Theory]
+    [InlineData(SocketError.ConnectionReset)]
+    [InlineData(SocketError.ConnectionAborted)]
+    public async Task AConnectionThatFailsWhileAcceptedDoesNotStopTheNext(SocketError error)
+    {
+        var attempts = 0;
+        var accepted = await NewServer().AcceptNextAsync(
+            _ => ++attempts <= MetadataServer.MaxAcceptFailures * 2 ? throw new SocketException((int)error) : ValueTask.FromResult("next"),
+            CancellationToken.None);
+
+        Assert.Equal("next", accepted);
+    }
+
+    [Fact]
+    public async Task ALoneUnexpectedAcceptErrorDoesNotStopTheNext()
+    {
+        var attempts = 0;
+        var accepted = await NewServer().AcceptNextAsync(
+            _ => ++attempts == 1 ? throw new SocketException((int)SocketError.HostDown) : ValueTask.FromResult("next"),
+            CancellationToken.None);
+
+        Assert.Equal("next", accepted);
+    }
+
+    [Fact]
+    public async Task AListenerThatKeepsFailingIsLeftToTheCallerRatherThanSpinning()
+    {
+        var attempts = 0;
+        await Assert.ThrowsAsync<SocketException>(() => NewServer().AcceptNextAsync<string>(
+            _ =>
+            {
+                attempts++;
+                throw new SocketException((int)SocketError.NetworkDown);
+            },
+            CancellationToken.None));
+
+        Assert.Equal(MetadataServer.MaxAcceptFailures, attempts);
+    }
+
+    [Fact]
     public void ServiceIdIsTheVsockTemplateForThePort()
     {
         var bytes = MetadataService.ServiceId.ToByteArray();
@@ -348,6 +452,49 @@ public class MetadataHostTests
         Options.Create(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl }),
         TimeProvider.System,
         NullLogger<MetadataServer>.Instance);
+
+    /// <summary>Real time, except that timers fire a thousand times sooner.</summary>
+    private sealed class HurriedTime : TimeProvider
+    {
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            System.CreateTimer(callback, state, dueTime / 1000, period);
+    }
+
+    /// <summary>A guest that connects and never sends a byte.</summary>
+    private sealed class StalledStream : Stream
+    {
+        public override bool CanRead => true;
+
+        public override bool CanWrite => false;
+
+        public override bool CanSeek => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
 
     /// <summary>Reads from one stream and writes to another, as a socket does.</summary>
     private sealed class DuplexStream(Stream input) : Stream

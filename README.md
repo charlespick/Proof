@@ -14,7 +14,7 @@ Proof has three pieces:
 | Piece | Where it runs | What it does |
 | ----- | ------------- | ------------ |
 | **Issuer** | A container, ideally on Kubernetes | Verifies requests from VMs and mints JWTs. Publishes the OIDC discovery document and signing keys. |
-| **Refresher** | Each Hyper-V host, as a Windows service | Vouches for the VMs it runs by handing each one a short-lived signed token. Also serves instance metadata to its VMs. |
+| **Refresher** | Each Hyper-V host, as two Windows services | Vouches for the VMs it runs by handing each one a short-lived signed token. Separately, serves instance metadata to its VMs. |
 | **Client** | Every VM image, Linux or Windows | The `proof` command trades the host's token for a JWT. The `proof-metadata` service presents instance metadata to cloud-init. |
 
 1. The **refresher** on the Hyper-V host signs a short-lived token for each VM and writes it into the VM.

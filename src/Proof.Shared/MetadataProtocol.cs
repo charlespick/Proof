@@ -59,7 +59,7 @@ public static class MetadataResponseStatus
     /// <summary>The VM's metadata block cannot be used. The host's log says why.</summary>
     public const string Invalid = "invalid";
 
-    /// <summary>Too many requests, or the host could not read or write the VM's settings. Retry later.</summary>
+    /// <summary>The host could not read or write the VM's settings. Retry later.</summary>
     public const string Unavailable = "unavailable";
 }
 

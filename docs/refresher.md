@@ -1,11 +1,11 @@
 # Installing the refresher
 
-The refresher is a Windows service that runs on each Hyper-V host. It does two jobs:
+The refresher runs on each Hyper-V host. It does two jobs, as two Windows services installed together:
 
-- **Vouches for VMs.** About every five minutes, and as soon as a VM starts or live-migrates in, it signs a short-lived token naming the VM and writes it into the VM through Hyper-V Data Exchange (KVP). The VM's [client](client.md) trades that token for a JWT at the [issuer](issuer.md).
-- **Serves instance metadata.** It answers requests from its VMs' cloud-init or Cloudbase-Init over a Hyper-V socket, using data you keep in each VM's notes.
+- **Vouches for VMs** (`proof-refresher`). About every five minutes, and as soon as a VM starts or live-migrates in, it signs a short-lived token naming the VM and writes it into the VM through Hyper-V Data Exchange (KVP). The VM's [client](client.md) trades that token for a JWT at the [issuer](issuer.md).
+- **Serves instance metadata** (`proof-metadata-host`). It answers requests from its VMs' cloud-init or Cloudbase-Init over a Hyper-V socket, using data you keep in each VM's notes.
 
-The refresher holds a signing key that never leaves the host. You tell the issuer to trust that key by adding it to the allowlist.
+`proof-refresher` holds a signing key that never leaves the host. You tell the issuer to trust that key by adding it to the allowlist. `proof-metadata-host` talks to guests, so it can't use that key.
 
 ## Requirements
 
@@ -52,10 +52,11 @@ If the install fails (`msiexec` exits 1603), the Application event log, source `
 
 ### Without the MSI
 
-`proof-refresher key create` creates the key and prints the allowlist entry. Then register the service and give it the access it needs:
+`proof-refresher key create` creates the key and prints the allowlist entry. Then register the services and give them the access they need:
 
 ```powershell
 sc.exe create proof-refresher binPath= "C:\Program Files\Proof\proof-refresher.exe" start= auto
+sc.exe --% create proof-metadata-host binPath= "\"C:\Program Files\Proof\proof-refresher.exe\" metadata serve" start= auto
 & "C:\Program Files\Proof\proof-refresher.exe" service grant
 ```
 
@@ -82,12 +83,12 @@ Only administrators may write the settings. The refresher checks the ownership a
 
 This writes a token to every running VM now and reports what happened. Inside a VM with the [client](client.md) installed, `proof status` should then show a host token.
 
-The service runs as its own virtual account, `NT SERVICE\proof-refresher`, with no password. The installer makes that account a member of Hyper-V Administrators, which it needs to see VMs. Without that membership Hyper-V shows it no VMs and nothing is written, with no error.
+Each service runs as its own virtual account, `NT SERVICE\proof-refresher` and `NT SERVICE\proof-metadata-host`, with no password. The installer makes both accounts members of Hyper-V Administrators, which they need to see VMs. Without that membership Hyper-V shows them no VMs and nothing is written, with no error. Only `NT SERVICE\proof-refresher` gets read on the host key.
 
 ## Rotating the host key
 
 1. Create a key under a new name (`proof-refresher key create`), and add its entry to the allowlist alongside the old one.
-2. Change `HostKeyName` and run `proof-refresher service grant` (or repair the MSI with `msiexec /fa`), then restart the service.
+2. Change `HostKeyName` and run `proof-refresher service grant` (or repair the MSI with `msiexec /fa`), then restart the `proof-refresher` service.
 3. After the old key's last token has expired, 20 minutes at most, remove the old key from the allowlist.
 
 A rebuilt host gets a new key and a new allowlist entry. Host keys cannot be exported, so there is nothing to restore.
@@ -131,7 +132,7 @@ user-data: !sensitive |
 
 **Write the block before the VM's first boot.** Without one, the VM gets its instance ID and hostname only, and cloud-init treats the instance as done. A block added afterwards does nothing until you give the VM a new instance ID (below).
 
-A block that can't be used, for example with a mistyped tag, serves nothing at all, and the refresher logs why. That is deliberate: it's better for provisioning to wait than to run without your user data or leave a secret behind.
+A block that can't be used, for example with a mistyped tag, serves nothing at all, and the `proof-metadata-host` service logs why. That is deliberate: it's better for provisioning to wait than to run without your user data or leave a secret behind.
 
 Useful commands:
 

@@ -9,11 +9,12 @@
       missing or unusable, and says why in the Application event log. Windows Installer then reports error 1920
       and rolls the install back.
 
-    The service runs as its virtual account, NT SERVICE\proof-refresher, not Local System. Between installing the
-    service and starting it, `proof-refresher service grant` switches the service to that account and gives the
-    account what it needs: membership of Hyper-V Administrators, read on the host key named in the
-    settings, and the event log source.
-    A repair (msiexec /fa) runs it again, for example after a new host key. Uninstalling takes the account out of
+    There are two services: proof-refresher signs tokens, and proof-metadata-host answers guests, apart so that what
+    guests reach cannot use the host key. Each runs as its virtual account, not Local System. Between installing the
+    services and starting them, `proof-refresher service grant` switches them to those accounts and gives the
+    accounts what they need: membership of Hyper-V Administrators, the event log source and, for proof-refresher
+    alone, read on the host key named in the settings.
+    A repair (msiexec /fa) runs it again, for example after a new host key. Uninstalling takes the accounts out of
     Hyper-V Administrators; the settings, the host key and the event source stay.
   -->
   <Package Name="Proof Refresher"
@@ -82,6 +83,25 @@
         </ServiceInstall>
 
         <ServiceControl Name="proof-refresher" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+
+        <!-- The same executable, and Local System only until the same switch, to NT SERVICE\proof-metadata-host. -->
+        <ServiceInstall Name="proof-metadata-host"
+                        DisplayName="Proof Metadata Host"
+                        Description="Serves instance metadata from VMs' notes to this host's VMs over a Hyper-V socket."
+                        Arguments="metadata serve"
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Vital="yes">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="60"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+
+        <ServiceControl Name="proof-metadata-host" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
       </Component>
 
       <!-- The defaults. An upgrade replaces it, so machine settings go in refresher.json. -->
