@@ -259,12 +259,7 @@ internal static class Commands
             Console.WriteLine($"Provisioning {block.Provisioning}");
             Console.WriteLine($"Sensitive    {block.SensitiveCount} values not yet cleared");
             var response = block.ToResponse(MetadataRequestHandler.InstanceIdFor(vm.BiosGuid), MetadataRequestHandler.HostnameFrom(vm.Name));
-            var served = response.MetaData!.Value.EnumerateObject().Select(p => p.Name)
-                .Prepend("uuid")
-                .Append(response.UserData is null ? null : "user-data")
-                .Append(response.NetworkData is null ? null : "network-data")
-                .OfType<string>();
-            Console.WriteLine($"Serves       {string.Join(", ", served)}");
+            Console.WriteLine($"Serves       {string.Join(", ", VmMetadataBlock.ServedNames(response))}");
             return 0;
         }
         catch (VmMetadataException ex)

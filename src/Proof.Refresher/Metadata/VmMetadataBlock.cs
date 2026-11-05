@@ -30,7 +30,7 @@ public sealed class VmMetadataBlock
     private const string ProvisioningKey = "provisioning";
     private const string StatusKey = "status";
 
-    /// <summary>The instance ID in the provisioning record.</summary>
+    /// <summary>EC2's name for the instance ID, which the provisioning record also uses.</summary>
     private const string InstanceIdKey = "instance-id";
 
     /// <summary>OpenStack's name for the instance ID, which comes from the BIOS GUID and so can't be set.</summary>
@@ -45,7 +45,6 @@ public sealed class VmMetadataBlock
     /// </summary>
     private static readonly Dictionary<string, string> RenamedKeys = new()
     {
-        ["instance-id"] = UuidKey,
         ["local-hostname"] = HostnameKey,
         ["public-keys"] = "public_keys",
     };
@@ -180,6 +179,29 @@ public sealed class VmMetadataBlock
             document.RootElement.Clone(),
             Served(UserDataKey),
             Served(NetworkDataKey));
+    }
+
+    /// <summary>What <paramref name="response"/> serves, by the names in the notes: the instance ID, the meta-data, then the other documents.</summary>
+    public static IEnumerable<string> ServedNames(MetadataResponse response)
+    {
+        yield return UuidKey;
+        if (response.MetaData is { ValueKind: JsonValueKind.Object } metaData)
+        {
+            foreach (var property in metaData.EnumerateObject())
+            {
+                yield return property.Name;
+            }
+        }
+
+        if (response.UserData is not null)
+        {
+            yield return UserDataKey;
+        }
+
+        if (response.NetworkData is not null)
+        {
+            yield return NetworkDataKey;
+        }
     }
 
     /// <summary>A top-level string, if it is there and may be served.</summary>
@@ -323,18 +345,20 @@ public sealed class VmMetadataBlock
                 throw new VmMetadataException($"{MetaDataKey} must be a mapping.");
             }
 
-            if (Child(metaDataMapping, UuidKey) is not null)
+            // The instance ID, under either name.
+            foreach (var key in (string[])[UuidKey, InstanceIdKey])
             {
-                throw new VmMetadataException($"{MetaDataKey} must not set {UuidKey}: it comes from the VM's BIOS GUID.");
+                if (Child(metaDataMapping, key) is not null)
+                {
+                    throw new VmMetadataException($"{MetaDataKey} must not set {key}: the instance ID, {UuidKey}, comes from the VM's BIOS GUID.");
+                }
             }
 
             foreach (var (old, name) in RenamedKeys)
             {
                 if (Child(metaDataMapping, old) is not null)
                 {
-                    throw new VmMetadataException(name == UuidKey
-                        ? $"{MetaDataKey} must not set {old}: the instance ID is {UuidKey}, and it comes from the VM's BIOS GUID."
-                        : $"{MetaDataKey} uses EC2's name {old}. The metadata is in OpenStack's format, where it is {name}.");
+                    throw new VmMetadataException($"{MetaDataKey} uses EC2's name {old}. The metadata is in OpenStack's format, where it is {name}.");
                 }
             }
         }

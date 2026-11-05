@@ -71,6 +71,14 @@ public class VmMetadataBlockTests
     }
 
     [Fact]
+    public void ServedNamesListTheInstanceIdThenMetaDataThenDocuments()
+    {
+        var response = Block("meta-data:\n  a: b\nuser-data: x\nnetwork-data: '{}'\n").ToResponse(InstanceId, "web01");
+        Assert.Equal(new[] { "uuid", "a", "hostname", "user-data", "network-data" }, VmMetadataBlock.ServedNames(response));
+        Assert.Equal(new[] { "uuid", "hostname" }, VmMetadataBlock.ServedNames(Block("").ToResponse(InstanceId, "web01")));
+    }
+
+    [Fact]
     public void InvalidYamlIsReportedWithoutQuotingIt()
     {
         var ex = Assert.Throws<VmMetadataException>(() => Block("user-data: !sensitive \"hunter2\n"));
