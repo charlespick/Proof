@@ -5,7 +5,7 @@ namespace Proof.Tests;
 
 public class VmMetadataBlockTests
 {
-    private const string InstanceId = "i-00000000000000000000000000000001";
+    private const string InstanceId = "00000000-0000-0000-0000-000000000001";
     private const string Stamp = "\"2026-10-31T12:00:00Z\"";
     private static readonly DateTimeOffset Now = new(2026, 10, 31, 12, 0, 0, TimeSpan.Zero);
 
@@ -40,18 +40,35 @@ public class VmMetadataBlockTests
     [Theory]
     [InlineData("bogus: 1\n")] // A misspelled key must not leave a value behind unnoticed.
     [InlineData("meta-data: text\n")]
-    [InlineData("meta-data:\n  instance-id: i-mine\n")] // The instance ID comes from the BIOS GUID only.
+    [InlineData("meta-data:\n  uuid: 1b4e28ba-2fa1-11d2-883f-0016d3cca427\n")] // The instance ID comes from the BIOS GUID only.
+    [InlineData("meta-data:\n  instance-id: i-mine\n")]
     [InlineData("user-data:\n  - a\n")]
+    [InlineData("network-data:\n  links: []\n")] // A string, served as written.
+    [InlineData("network-data: '[]'\n")] // network_data.json is an object.
+    [InlineData("network-data: '{\"links\": ['\n")]
+    [InlineData("network-data:\n")]
     [InlineData("provisioning: done\n")]
     [InlineData("provisioning:\n  status: done\n")]
     [InlineData("user-data: !secret hunter2\n")] // A misspelled tag must not pass as an ordinary value.
     [InlineData("meta-data: !sensitive\n  a: b\n")] // Only values are cleared.
     [InlineData("meta-data:\n  a: &x hunter2\n  b: *x\n")] // A sensitive value could have a second name.
-    [InlineData("meta-data:\n  a/b: c\n")]
+    [InlineData("meta-data:\n  !!str a: c\n")]
     [InlineData("meta-data:\n  a: 1\n  a: 2\n")]
     [InlineData("a: 1\n---\nb: 2\n")]
     [InlineData("- a\n")]
     public void BadBlocksAreRefused(string yaml) => Assert.Throws<VmMetadataException>(() => Block(yaml));
+
+    [Theory]
+    // Served under EC2's names, these would be ignored by cloud-init and Cloudbase-Init without a word.
+    [InlineData("local-hostname", "hostname")]
+    [InlineData("public-keys", "public_keys")]
+    [InlineData("instance-id", "uuid")]
+    public void EcTwoNamesAreRefusedWithTheOpenStackName(string old, string name)
+    {
+        var ex = Assert.Throws<VmMetadataException>(() => Block($"meta-data:\n  {old}: a\n"));
+        Assert.Contains(old, ex.Message);
+        Assert.Contains(name, ex.Message);
+    }
 
     [Fact]
     public void InvalidYamlIsReportedWithoutQuotingIt()
@@ -61,16 +78,47 @@ public class VmMetadataBlockTests
     }
 
     [Fact]
+    public void InvalidNetworkDataIsReportedWithoutQuotingIt()
+    {
+        var ex = Assert.Throws<VmMetadataException>(() => Block("network-data: |\n  {\"links\": [],\n   \"hunter2\"}\n"));
+        Assert.Contains("line 2", ex.Message);
+        Assert.DoesNotContain("hunter2", ex.Message);
+    }
+
+    [Fact]
+    public void NetworkDataIsServedExactlyAsWritten()
+    {
+        const string Json = "{\n  \"links\": [ { \"id\": \"eth0\", \"mtu\": 1500 } ],\n  \"networks\": []\n}\n";
+        var response = Block($"network-data: |\n{string.Concat(Json.Split('\n').Where(l => l.Length > 0).Select(l => $"  {l}\n"))}").ToResponse(InstanceId, null);
+        Assert.Equal(Json, response.NetworkData);
+    }
+
+    [Fact]
+    public void NetworkDataMayBeSensitiveAndIsThenClearedToo()
+    {
+        var block = Block("network-data: !sensitive '{\"links\": []}'\n");
+        Assert.Equal("{\"links\": []}", block.ToResponse(InstanceId, null).NetworkData);
+
+        var finished = VmMetadataBlock.Find(block.Finish(ProvisioningStatus.Complete, InstanceId, Now))!;
+        Assert.Null(finished.ToResponse(InstanceId, null).NetworkData);
+        Assert.Equal(0, finished.SensitiveCount);
+    }
+
+    [Fact]
+    public void KeysNeedNotBePathsAnyMore() =>
+        Assert.Equal("c", Block("meta-data:\n  meta:\n    a/b c=d: c\n").ToResponse(InstanceId, null).MetaData!.Value.GetProperty("meta").GetProperty("a/b c=d").GetString());
+
+    [Fact]
     public void ServesTreeAsStrings()
     {
         var response = Block("""
             meta-data:
-              local-hostname: web01
+              hostname: web01
               answer: 012
               enabled: no
               placement:
                 availability-zone: rack-1
-              public-keys:
+              public_keys:
                 - ssh-ed25519 AAAA one
             user-data: |
               #cloud-config
@@ -83,18 +131,18 @@ public class VmMetadataBlockTests
         Assert.Equal(ProvisioningStatus.Pending, response.Provisioning);
         Assert.Equal("#cloud-config\nhostname: web01\n", response.UserData?.ReplaceLineEndings("\n"));
         var tree = response.MetaData!.Value;
-        Assert.Equal("web01", tree.GetProperty("local-hostname").GetString());
+        Assert.Equal("web01", tree.GetProperty("hostname").GetString());
         Assert.Equal("012", tree.GetProperty("answer").GetString());
         Assert.Equal("no", tree.GetProperty("enabled").GetString());
         Assert.Equal("rack-1", tree.GetProperty("placement").GetProperty("availability-zone").GetString());
-        Assert.Equal("ssh-ed25519 AAAA one", tree.GetProperty("public-keys")[0].GetString());
+        Assert.Equal("ssh-ed25519 AAAA one", tree.GetProperty("public_keys")[0].GetString());
     }
 
     [Fact]
     public void HostnameDefaultsToTheOneGiven()
     {
         var response = Block("").ToResponse(InstanceId, "from-vm-name");
-        Assert.Equal("from-vm-name", response.MetaData!.Value.GetProperty("local-hostname").GetString());
+        Assert.Equal("from-vm-name", response.MetaData!.Value.GetProperty("hostname").GetString());
     }
 
     [Fact]
@@ -102,7 +150,7 @@ public class VmMetadataBlockTests
     {
         var block = Block("""
             meta-data:
-              admin-pass: !sensitive hunter2
+              admin_pass: !sensitive hunter2
             user-data: !sensitive |
               #cloud-config
               password: hunter3
@@ -111,7 +159,7 @@ public class VmMetadataBlockTests
 
         Assert.Equal(2, block.SensitiveCount);
         var response = block.ToResponse(InstanceId, null);
-        Assert.Equal("hunter2", response.MetaData!.Value.GetProperty("admin-pass").GetString());
+        Assert.Equal("hunter2", response.MetaData!.Value.GetProperty("admin_pass").GetString());
         Assert.Equal("#cloud-config\npassword: hunter3\n", response.UserData?.ReplaceLineEndings("\n"));
     }
 
@@ -123,8 +171,8 @@ public class VmMetadataBlockTests
         var notes = Notes("""
             # Provisioned by the web team.
             meta-data:
-              local-hostname: web01   # keep this comment
-              admin-pass: !sensitive hunter2  # and this one
+              hostname: web01   # keep this comment
+              admin_pass: !sensitive hunter2  # and this one
               keys:
                 - plain
                 - !sensitive hunter3
@@ -141,8 +189,8 @@ public class VmMetadataBlockTests
         Assert.Equal(Notes($$"""
             # Provisioned by the web team.
             meta-data:
-              local-hostname: web01   # keep this comment
-              admin-pass: !cleared {{Stamp}}  # and this one
+              hostname: web01   # keep this comment
+              admin_pass: !cleared {{Stamp}}  # and this one
               keys:
                 - plain
                 - !cleared {{Stamp}}
@@ -156,8 +204,8 @@ public class VmMetadataBlockTests
         Assert.Equal(0, block.SensitiveCount);
         var response = block.ToResponse(InstanceId, null);
         Assert.Null(response.UserData);
-        Assert.False(response.MetaData!.Value.TryGetProperty("admin-pass", out _));
-        Assert.Equal("web01", response.MetaData.Value.GetProperty("local-hostname").GetString());
+        Assert.False(response.MetaData!.Value.TryGetProperty("admin_pass", out _));
+        Assert.Equal("web01", response.MetaData.Value.GetProperty("hostname").GetString());
         Assert.Equal(1, response.MetaData.Value.GetProperty("keys").GetArrayLength());
     }
 

@@ -12,7 +12,7 @@ namespace Proof.Tests;
 
 public class MetadataHostTests
 {
-    private const string InstanceId = "i-00112233445566778899aabbccddeeff";
+    private const string InstanceId = "00112233-4455-6677-8899-aabbccddeeff";
     private static readonly Guid BiosGuid = new("00112233-4455-6677-8899-aabbccddeeff");
 
     private readonly FakeVmNotes vms = new();
@@ -56,7 +56,7 @@ public class MetadataHostTests
         Assert.Equal(InstanceId, response.InstanceId);
         Assert.Equal(ProvisioningStatus.None, response.Provisioning);
         Assert.Null(response.UserData);
-        Assert.Equal("local-hostname", Assert.Single(response.MetaData!.Value.EnumerateObject()).Name);
+        Assert.Equal("hostname", Assert.Single(response.MetaData!.Value.EnumerateObject()).Name);
         Assert.Equal("password: hunter2", vms.Notes(vm));
         Assert.Equal(0, vms.Writes);
     }
@@ -151,7 +151,7 @@ public class MetadataHostTests
         var response = await Get(a);
         Assert.Equal(InstanceId, response.InstanceId);
         Assert.Equal("for-a", response.UserData);
-        Assert.Equal("a", response.MetaData!.Value.GetProperty("local-hostname").GetString());
+        Assert.Equal("a", response.MetaData!.Value.GetProperty("hostname").GetString());
         Assert.Equal("for-b", (await Get(b)).UserData);
     }
 

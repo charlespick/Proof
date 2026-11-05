@@ -105,7 +105,7 @@ A VM whose writes keep failing is logged as a warning, and as an error once its 
 
 ## Instance metadata
 
-The refresher can also give VMs their hostname, SSH keys and cloud-init user data, much as a public cloud does. You write the data into the VM's notes in Hyper-V, and the VM reads it from an EC2-compatible endpoint. The [client](client.md#instance-metadata) page covers the VM side.
+The refresher can also give VMs their hostname, SSH keys, network configuration and cloud-init user data, much as a public cloud does. You write the data into the VM's notes in Hyper-V, and the VM reads it from an endpoint in OpenStack's metadata format. The [client](client.md#instance-metadata) page covers the VM side.
 
 Add a block between two marker lines to the VM's notes, using Hyper-V Manager or `Set-VM -Notes`. The rest of your notes are left alone.
 
@@ -113,9 +113,18 @@ Add a block between two marker lines to the VM's notes, using Hyper-V Manager or
 Owned by the web team.
 #proof-metadata-begin
 meta-data:
-  local-hostname: web01
-  public-keys:
-    - ssh-ed25519 AAAA... you@example.com
+  hostname: web01
+  public_keys:
+    you: ssh-ed25519 AAAA... you@example.com
+  admin_pass: !sensitive change-me
+network-data: |
+  {
+    "links": [{ "id": "eth0", "type": "phy", "ethernet_mac_address": "00:15:5d:01:02:03" }],
+    "networks": [{ "id": "net0", "link": "eth0", "type": "ipv4",
+                   "ip_address": "192.0.2.10", "netmask": "255.255.255.0",
+                   "routes": [{ "network": "0.0.0.0", "netmask": "0.0.0.0", "gateway": "192.0.2.1" }] }],
+    "services": [{ "type": "dns", "address": "192.0.2.53" }]
+  }
 user-data: !sensitive |
   #cloud-config
   password: change-me
@@ -125,9 +134,11 @@ user-data: !sensitive |
 #proof-metadata-end
 ```
 
-- The marker lines start in the first column. The top-level keys are `meta-data`, `user-data` and `provisioning`.
+- The marker lines start in the first column. The top-level keys are `meta-data`, `user-data`, `network-data` and `provisioning`.
 - Mark secrets with `!sensitive`. When provisioning finishes, the host replaces each one in the notes with `!cleared "<time>"`, so the secret doesn't sit in the VM's settings forever.
-- `instance-id` comes from the VM's BIOS GUID and can't be set. `local-hostname` defaults to the VM's name.
+- `meta-data` becomes `meta_data.json`, with OpenStack's names: `hostname`, `public_keys` and `admin_pass`, the Administrator password that Cloudbase-Init sets. `hostname` defaults to the VM's name. `public_keys` may be one key, a list or a mapping from name to key; it is always served as a mapping, which is what Cloudbase-Init reads. EC2's names, such as `local-hostname`, are refused, since the clients would ignore them.
+- `uuid`, the instance ID, is the VM's BIOS GUID and can't be set. It matches the SMBIOS UUID the guest sees, which cloud-init checks on every later boot.
+- `network-data` is OpenStack's [`network_data.json`](https://docs.openstack.org/nova/latest/user/metadata.html#openstack-format-metadata) as a string. It is served exactly as written and only checked to be a JSON object; cloud-init and Cloudbase-Init apply it. Its links name each adapter by MAC address, so give the VM's adapters static MACs (`Set-VMNetworkAdapter -StaticMacAddress`) before the first boot. Leave it out and the VM uses DHCP.
 - Hyper-V allows 32,768 characters of notes.
 
 **Write the block before the VM's first boot.** Without one, the VM gets its instance ID and hostname only, and cloud-init treats the instance as done. A block added afterwards does nothing until you give the VM a new instance ID (below).
@@ -143,7 +154,7 @@ $p = "C:\Program Files\Proof\proof-refresher.exe"
 & $p metadata new-instance-id --vm web02          # make a clone a new instance (VM must be off)
 ```
 
-**Cloning.** A copy that keeps the original's BIOS GUID is the same instance to cloud-init, so it won't be provisioned again. To make a copy a new instance, run `new-instance-id` on it while it is off, and set `provisioning: pending` in its notes if the source had finished.
+**Cloning.** A copy that keeps the original's BIOS GUID is the same instance to cloud-init, so it won't be provisioned again. To make a copy a new instance, run `new-instance-id` on it while it is off, and set `provisioning: pending` in its notes if the source had finished. Give the copy its own MAC address and `network-data` too, or it comes up with the original's address.
 
 Avoid checkpointing a VM that holds secrets in its notes, because checkpoints keep their own copy of the VM's settings.
 

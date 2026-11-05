@@ -68,12 +68,18 @@ public static class MetadataResponseStatus
 public sealed record MetadataRequest(string Op, string? Result = null);
 
 /// <param name="Status">One of <see cref="MetadataResponseStatus"/>. The other members are set only when it is ok.</param>
-/// <param name="InstanceId">The EC2-style instance ID, from the VM's BIOS GUID.</param>
+/// <param name="InstanceId">The instance ID: the VM's BIOS GUID as a lowercase UUID, which the guest also reads from SMBIOS.</param>
 /// <param name="Provisioning">One of <see cref="ProvisioningStatus"/>.</param>
 /// <param name="MetaData">The meta-data tree: objects, arrays and strings.</param>
 /// <param name="UserData">The user data, if there is any to serve.</param>
+/// <param name="NetworkData">The network document as written, a JSON object, if there is one to serve.</param>
 public sealed record MetadataResponse(
-    string Status, string? InstanceId = null, string? Provisioning = null, JsonElement? MetaData = null, string? UserData = null);
+    string Status,
+    string? InstanceId = null,
+    string? Provisioning = null,
+    JsonElement? MetaData = null,
+    string? UserData = null,
+    string? NetworkData = null);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(MetadataRequest))]

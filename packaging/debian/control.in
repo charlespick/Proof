@@ -16,6 +16,9 @@ Description: Hyper-V VM identity client
  It reads the KVP pool that hv_kvp_daemon keeps, and its settings from
  /etc/proof/config.json, which the image provides.
  .
- proof-metadata is a service on 127.0.0.1:8169 that serves the EC2-style
+ proof-metadata is a service on 127.0.0.1:8169 that serves the OpenStack
  instance metadata API to cloud-init from the Hyper-V host and the VM's Hyper-V
  notes. It needs the hv_sock kernel module.
+ .
+ It also installs Proof, a cloud-init data source for that API, which the
+ image's cloud-init config turns on.

@@ -2,3 +2,5 @@
 *.sh text eol=lf
 packaging/debian/** text eol=lf
 Dockerfile text eol=lf
+# cloud-init loads Python from these on Linux.
+packaging/cloud-init/** text eol=lf

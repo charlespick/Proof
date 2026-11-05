@@ -252,14 +252,19 @@ internal static class Commands
             {
                 Console.WriteLine(LoadOptions().UnsetMetadataHandler == UnsetMetadataHandlers.NotFound
                     ? "No metadata block, and Proof:UnsetMetadataHandler is 404: it gets 404."
-                    : "No metadata block: it gets its instance ID and local-hostname only.");
+                    : "No metadata block: it gets its instance ID (uuid) and hostname only.");
                 return 0;
             }
 
             Console.WriteLine($"Provisioning {block.Provisioning}");
             Console.WriteLine($"Sensitive    {block.SensitiveCount} values not yet cleared");
             var response = block.ToResponse(MetadataRequestHandler.InstanceIdFor(vm.BiosGuid), MetadataRequestHandler.HostnameFrom(vm.Name));
-            Console.WriteLine($"Serves       {string.Join(", ", response.MetaData!.Value.EnumerateObject().Select(p => p.Name))}{(response.UserData is null ? "" : ", user-data")}");
+            var served = response.MetaData!.Value.EnumerateObject().Select(p => p.Name)
+                .Prepend("uuid")
+                .Append(response.UserData is null ? null : "user-data")
+                .Append(response.NetworkData is null ? null : "network-data")
+                .OfType<string>();
+            Console.WriteLine($"Serves       {string.Join(", ", served)}");
             return 0;
         }
         catch (VmMetadataException ex)

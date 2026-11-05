@@ -26,11 +26,29 @@ public sealed class VmMetadataBlock
 
     private const string MetaDataKey = "meta-data";
     private const string UserDataKey = "user-data";
+    private const string NetworkDataKey = "network-data";
     private const string ProvisioningKey = "provisioning";
     private const string StatusKey = "status";
+
+    /// <summary>The instance ID in the provisioning record.</summary>
     private const string InstanceIdKey = "instance-id";
-    private const string HostnameKey = "local-hostname";
+
+    /// <summary>OpenStack's name for the instance ID, which comes from the BIOS GUID and so can't be set.</summary>
+    private const string UuidKey = "uuid";
+
+    private const string HostnameKey = "hostname";
     private const int MaxDepth = 16;
+
+    /// <summary>
+    /// EC2's names for meta-data that OpenStack names differently. Served under the old name, each would be ignored by
+    /// cloud-init and Cloudbase-Init without a word, so a block that uses one is refused with the name to use instead.
+    /// </summary>
+    private static readonly Dictionary<string, string> RenamedKeys = new()
+    {
+        ["instance-id"] = UuidKey,
+        ["local-hostname"] = HostnameKey,
+        ["public-keys"] = "public_keys",
+    };
 
     private readonly string notes;
     private readonly int blockStart;
@@ -160,8 +178,12 @@ public sealed class VmMetadataBlock
             instanceId,
             Provisioning,
             document.RootElement.Clone(),
-            Child(root, UserDataKey) is YamlScalarNode userData && IsServed(userData) ? userData.Value : null);
+            Served(UserDataKey),
+            Served(NetworkDataKey));
     }
+
+    /// <summary>A top-level string, if it is there and may be served.</summary>
+    private string? Served(string key) => Child(root, key) is YamlScalarNode value && IsServed(value) ? value.Value : null;
 
     /// <summary>
     /// The notes after provisioning finishes: each sensitive value is replaced, and the status recorded unless the VM
@@ -288,9 +310,9 @@ public sealed class VmMetadataBlock
 
         foreach (var key in root.Children.Keys)
         {
-            if (key is not YamlScalarNode { Value: MetaDataKey or UserDataKey or ProvisioningKey })
+            if (key is not YamlScalarNode { Value: MetaDataKey or UserDataKey or NetworkDataKey or ProvisioningKey })
             {
-                throw new VmMetadataException($"The only top-level keys are {MetaDataKey}, {UserDataKey} and {ProvisioningKey}. A misspelled key would be ignored, and a value meant to be sensitive could stay in the notes.");
+                throw new VmMetadataException($"The only top-level keys are {MetaDataKey}, {UserDataKey}, {NetworkDataKey} and {ProvisioningKey}. A misspelled key would be ignored, and a value meant to be sensitive could stay in the notes.");
             }
         }
 
@@ -301,15 +323,62 @@ public sealed class VmMetadataBlock
                 throw new VmMetadataException($"{MetaDataKey} must be a mapping.");
             }
 
-            if (Child(metaDataMapping, InstanceIdKey) is not null)
+            if (Child(metaDataMapping, UuidKey) is not null)
             {
-                throw new VmMetadataException($"{MetaDataKey} must not set {InstanceIdKey}: it comes from the VM's BIOS GUID.");
+                throw new VmMetadataException($"{MetaDataKey} must not set {UuidKey}: it comes from the VM's BIOS GUID.");
+            }
+
+            foreach (var (old, name) in RenamedKeys)
+            {
+                if (Child(metaDataMapping, old) is not null)
+                {
+                    throw new VmMetadataException(name == UuidKey
+                        ? $"{MetaDataKey} must not set {old}: the instance ID is {UuidKey}, and it comes from the VM's BIOS GUID."
+                        : $"{MetaDataKey} uses EC2's name {old}. The metadata is in OpenStack's format, where it is {name}.");
+                }
             }
         }
 
         if (Child(root, UserDataKey) is { } userData && userData is not YamlScalarNode)
         {
             throw new VmMetadataException($"{UserDataKey} must be a string. Use a | block for several lines.");
+        }
+
+        switch (Child(root, NetworkDataKey))
+        {
+            case null:
+                break;
+            case YamlScalarNode networkData:
+                // A cleared value is a timestamp now, and is never served.
+                if (!IsCleared(networkData))
+                {
+                    ValidateNetworkData(networkData.Value ?? "");
+                }
+
+                break;
+            default:
+                throw new VmMetadataException($"{NetworkDataKey} must be a string holding OpenStack's network_data.json. Use a | block for several lines.");
+        }
+    }
+
+    /// <summary>
+    /// The network document is served as written and only checked here to be a JSON object: cloud-init and
+    /// Cloudbase-Init read what is in it, and one that doesn't parse would leave the VM without its network.
+    /// </summary>
+    private static void ValidateNetworkData(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 64 });
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new VmMetadataException($"{NetworkDataKey} must be a JSON object, as network_data.json is.");
+            }
+        }
+        catch (JsonException ex)
+        {
+            // Only the place: the parser's message can quote the text.
+            throw new VmMetadataException($"{NetworkDataKey} is not valid JSON, near line {(ex.LineNumber ?? 0) + 1} of its value.");
         }
     }
 
@@ -333,10 +402,9 @@ public sealed class VmMetadataBlock
                 RefuseTag(mapping);
                 foreach (var (key, value) in mapping.Children)
                 {
-                    if (key is not YamlScalarNode { Value: { Length: > 0 } name } || !key.Tag.IsEmpty
-                        || name.Any(c => c is '/' or '=' || char.IsWhiteSpace(c) || char.IsControl(c)))
+                    if (key is not YamlScalarNode { Value: { Length: > 0 } name } || !key.Tag.IsEmpty || name.Any(char.IsControl))
                     {
-                        throw new VmMetadataException("Keys must be plain text without '/', '=' or spaces, since they become paths.");
+                        throw new VmMetadataException("Keys must be plain text, with no tag.");
                     }
 
                     ValidateNode(key, depth + 1);

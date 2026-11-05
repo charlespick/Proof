@@ -36,12 +36,12 @@ function Get-Settings([guid] $vmId) {
 # Through CIM, because Get-VM can show notes this session already saw, not what another process has since written.
 function Get-Notes([guid] $vmId) { (Get-Settings $vmId).Notes -join "`r`n" }
 
-function Get-BiosGuid([guid] $vmId) { ([guid](Get-Settings $vmId).BIOSGUID).ToString('N') }
+function Get-BiosGuid([guid] $vmId) { ([guid](Get-Settings $vmId).BIOSGUID).ToString('D') }
 
 $vm = New-VM -Name $vmName -Generation 2 -NoVHD
 try {
     $id = $vm.Id
-    $instanceId = "i-$(Get-BiosGuid $id)"
+    $instanceId = Get-BiosGuid $id
 
     $result = Invoke-Refresher metadata show --vm $vmName
     Check ($result.Exit -eq 0 -and $result.Output -match 'No metadata block') 'a VM with empty notes has no block'
@@ -57,11 +57,13 @@ try {
         '#proof-metadata-begin'
         '# Written by hand, with <markup> & "quotes" and é.'
         'meta-data:'
-        '  local-hostname: web01'
-        '  admin-pass: !sensitive hunter2'
+        '  hostname: web01'
+        '  admin_pass: !sensitive hunter2'
         'user-data: !sensitive |'
         '  #cloud-config'
         '  password: hunter3'
+        'network-data: |'
+        '  { "links": [{ "id": "eth0", "ethernet_mac_address": "02:00:00:00:00:01" }], "networks": [] }'
         'provisioning: pending'
         '#proof-metadata-end'
         'Do not delete.'
@@ -72,6 +74,7 @@ try {
     Check ($result.Exit -eq 0 -and $result.Output -match 'Provisioning pending') 'a block is found through WMI, by VM ID'
     Check ($result.Output -match 'Sensitive\s+2') '...with its two sensitive values'
     Check ($result.Output -notmatch 'hunter') '...which show does not print'
+    Check ($result.Output -match 'Serves\s+uuid, hostname, admin_pass, user-data, network-data') "...and serves the meta-data, user data and network data ($(($result.Output -split "`n" | Select-String 'Serves').Line.Trim()))"
 
     $result = Invoke-Refresher metadata finish --vm $vmName --result complete
     Check ($result.Exit -eq 0) "finish succeeds ($($result.Output.Trim()))"
@@ -105,7 +108,7 @@ try {
     Check ($result.Exit -eq 0) "new-instance-id succeeds on a VM that is off ($($result.Output.Trim()))"
     $changed = Get-BiosGuid $id
     Check ($changed -ne $before) "the BIOS GUID changed ($before to $changed)"
-    Check ($result.Output -match [regex]::Escape("i-$changed")) '...to the one it reported'
+    Check ($result.Output -match [regex]::Escape($changed)) '...to the one it reported'
     Check ((Get-Notes $id) -match "`r`n") '...and the change left the notes'' CRLF alone'
     Check ($null -ne (Get-Settings $id)) '...and the VM ID did not'
 }

@@ -141,9 +141,9 @@ try {
     Check ($metadata.State -eq 'Running') '...and the proof-metadata service is running'
     Check ($metadata.StartMode -eq 'Auto') '...and starts automatically'
     Check ($metadata.StartName -eq 'NT AUTHORITY\LocalService') "...as Local Service (got $($metadata.StartName))"
-    Check ((Invoke-WebRequest 'http://127.0.0.1:8169/' -UseBasicParsing).Content -match '(?m)^latest$') '...and answers on 127.0.0.1:8169'
+    Check ((Invoke-WebRequest 'http://127.0.0.1:8169/' -UseBasicParsing).Content -match '(?m)^openstack$') '...and answers on 127.0.0.1:8169'
     # This machine is not a guest of a Proof host, so the API says it cannot reach one.
-    Check ((Invoke-WebRequest 'http://127.0.0.1:8169/latest/meta-data/' -UseBasicParsing -SkipHttpErrorCheck).StatusCode -eq 503) '...and says 503 with no host to ask'
+    Check ((Invoke-WebRequest 'http://127.0.0.1:8169/openstack' -UseBasicParsing -SkipHttpErrorCheck).StatusCode -eq 503) '...and says 503 with no host to ask'
     $listening = @((Get-NetTCPConnection -State Listen -LocalPort 8169).LocalAddress)
     Check (($listening.Count -eq 1) -and ($listening[0] -eq '127.0.0.1')) "...and listens on loopback only (got $listening)"
 

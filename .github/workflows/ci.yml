@@ -170,11 +170,16 @@ jobs:
           test "$(proof-metadata --version)" = "$ProofVersion+$ProofCommit"
           systemctl is-active proof-metadata
           systemctl is-enabled proof-metadata
-          curl -fsS http://127.0.0.1:8169/ | grep -x latest
+          curl -fsS http://127.0.0.1:8169/ | grep -x openstack
           # This runner has no Proof host, so the API says it cannot reach one.
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8169/latest/meta-data/)" = 503
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8169/openstack)" = 503
           # Reachable only from this machine.
           if ss -ltn | grep -E '(0\.0\.0\.0|\[::\]|\*):8169'; then echo "proof-metadata listens beyond loopback" >&2; exit 1; fi
+          # The cloud-init data source, against the distribution's cloud-init. Installing it changes nothing until a reboot.
+          sudo apt-get install -y --no-install-recommends cloud-init
+          cloud-init --version
+          # -I, so the copy the package installed is the one tested.
+          python3 -I packaging/cloud-init/test_datasource.py
           sudo apt-get remove -y proof
           if command -v proof; then echo "proof is still installed" >&2; exit 1; fi
           if systemctl is-active proof-metadata; then echo "proof-metadata is still running" >&2; exit 1; fi

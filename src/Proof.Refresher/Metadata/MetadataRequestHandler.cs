@@ -107,10 +107,11 @@ public sealed partial class MetadataRequestHandler(
     }
 
     /// <summary>
-    /// The instance ID is the VM's BIOS GUID. A copy that keeps it is the same instance to cloud-init;
-    /// a copy given a new one is provisioned as a new instance.
+    /// The instance ID is the VM's BIOS GUID, in the form the guest reads from SMBIOS (<c>/sys/class/dmi/id/product_uuid</c>
+    /// on Linux): cloud-init reuses its cached data on a later boot only if the two match. A copy that keeps the GUID
+    /// is the same instance; a copy given a new one is provisioned as a new instance.
     /// </summary>
-    public static string InstanceIdFor(Guid biosGuid) => $"i-{biosGuid:N}";
+    public static string InstanceIdFor(Guid biosGuid) => biosGuid.ToString("D");
 
     /// <summary>The VM's name as its default hostname, if it can be one.</summary>
     public static string? HostnameFrom(string name) => HostnamePattern().IsMatch(name) ? name : null;

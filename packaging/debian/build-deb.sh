@@ -27,6 +27,10 @@ install -Dm0755 "$publish/proof-metadata" "$root/usr/bin/proof-metadata"
 install -Dm0644 "$here/proof-metadata.service" "$root/usr/lib/systemd/system/proof-metadata.service"
 install -Dm0644 "$here/proof-metadata.modules" "$root/usr/lib/modules-load.d/proof-metadata.conf"
 install -Dm0644 "$here/copyright" "$root/usr/share/doc/proof/copyright"
+# The cloud-init data source. Inert until the image's cloud-init config names it.
+for f in __init__.py DataSourceProof.py; do
+  install -Dm0644 "$here/../cloud-init/proof_cloudinit/$f" "$root/usr/lib/python3/dist-packages/proof_cloudinit/$f"
+done
 # The image supplies config.json, so the package owns only the directory.
 install -d -m0755 "$root/etc/proof"
 

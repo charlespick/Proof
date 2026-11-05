@@ -1,42 +1,43 @@
-using System.Globalization;
 using System.Net;
-using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.WebUtilities;
 using Proof.Shared;
 
 namespace Proof.Metadata;
 
 /// <summary>
-/// The local HTTP API: EC2's instance metadata paths for cloud-init and Cloudbase-Init, plus
+/// The local HTTP API: OpenStack's metadata paths for cloud-init and Cloudbase-Init, plus
 /// <c>/proof/v1/provisioning</c> to report the end of provisioning, all translated to requests to the host.
 /// </summary>
-public sealed partial class MetadataApi(IHostChannel host, TimeProvider time, ILogger<MetadataApi> logger)
+/// <remarks>
+/// Only <c>latest</c> is served. Cloudbase-Init posts the password it sets back to the metadata service when the
+/// version <c>2013-04-04</c> exists, and nothing a guest sends may be stored, so no dated version is listed or served.
+/// </remarks>
+public sealed class MetadataApi(IHostChannel host, TimeProvider time, ILogger<MetadataApi> logger)
 {
     public const int DefaultPort = 8169;
 
-    public const string TokenPath = "/latest/api/token";
+    public const string OpenStackPath = "/openstack";
     public const string ProvisioningPath = "/proof/v1/provisioning";
 
-    private const string TokenHeader = "X-aws-ec2-metadata-token";
-    private const string TokenTtlHeader = "X-aws-ec2-metadata-token-ttl-seconds";
-    private const int MaxTokenTtlSeconds = 21600;
+    private const string JsonContentType = "application/json";
 
     // Long enough to serve one crawl of many paths from one answer, and short enough that an operator's edit shows soon.
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(5);
 
-    /// <summary>The versions listed at the root. Any version-shaped path is served, since the tree does not vary by version.</summary>
-    private static readonly string[] Versions = ["2009-04-04", "2016-09-02", "2018-09-24", "2021-03-23", "latest"];
-
-    private readonly byte[] tokenKey = RandomNumberGenerator.GetBytes(32);
     private readonly SemaphoreSlim cacheGate = new(1, 1);
     private MetadataResponse? cached;
     private DateTimeOffset cachedUntil;
 
-    [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}$|^latest$")]
-    private static partial Regex VersionPattern();
+    /// <summary>What a path under <c>/openstack</c> names.</summary>
+    private enum Document
+    {
+        Versions,
+        Files,
+        MetaData,
+        NetworkData,
+        UserData,
+    }
 
     public async Task HandleAsync(HttpContext context)
     {
@@ -47,26 +48,29 @@ public sealed partial class MetadataApi(IHostChannel host, TimeProvider time, IL
         }
 
         var (method, path) = (context.Request.Method, context.Request.Path.Value ?? "/");
-        if (path == TokenPath)
-        {
-            await (method == HttpMethods.Put ? IssueTokenAsync(context) : WriteAsync(context, StatusCodes.Status405MethodNotAllowed, "Use PUT."));
-        }
-        else if (path == ProvisioningPath || path.StartsWith(ProvisioningPath + "/", StringComparison.Ordinal))
+        if (path == ProvisioningPath || path.StartsWith(ProvisioningPath + "/", StringComparison.Ordinal))
         {
             await ProvisioningAsync(context, method, path[ProvisioningPath.Length..].Trim('/'));
         }
         else if (method is not ("GET" or "HEAD"))
         {
+            // Cloudbase-Init's password post among them. It only tries one where the dated version exists.
             await WriteAsync(context, StatusCodes.Status405MethodNotAllowed, "Use GET.");
-        }
-        else if (!HasAcceptableToken(context.Request))
-        {
-            // As on EC2: no token is allowed, and a wrong one is refused so the caller asks for a new one.
-            await WriteAsync(context, StatusCodes.Status401Unauthorized, "The token is not valid.");
         }
         else
         {
-            await ServeTreeAsync(context, path);
+            switch (path.Split('/', StringSplitOptions.RemoveEmptyEntries))
+            {
+                case []:
+                    await WriteAsync(context, StatusCodes.Status200OK, OpenStackPath.TrimStart('/'));
+                    break;
+                case ["openstack", .. var rest] when Find(rest) is { } document:
+                    await ServeAsync(context, document);
+                    break;
+                default:
+                    await WriteAsync(context, StatusCodes.Status404NotFound, "Not found.");
+                    break;
+            }
         }
     }
 
@@ -93,21 +97,20 @@ public sealed partial class MetadataApi(IHostChannel host, TimeProvider time, IL
             : "The Host header must name this machine's loopback address.";
     }
 
-    private async Task ServeTreeAsync(HttpContext context, string path)
+    /// <summary>The document a path names, decided before the host is asked, so a path that can't exist never waits on it.</summary>
+    private static Document? Find(string[] segments) => segments switch
     {
-        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Length == 0)
-        {
-            await WriteAsync(context, StatusCodes.Status200OK, string.Join('\n', Versions));
-            return;
-        }
+        [] => Document.Versions,
+        [OpenStackDocuments.Latest] => Document.Files,
+        [OpenStackDocuments.Latest, OpenStackDocuments.MetaData] => Document.MetaData,
+        [OpenStackDocuments.Latest, OpenStackDocuments.NetworkData] => Document.NetworkData,
+        [OpenStackDocuments.Latest, OpenStackDocuments.UserData] => Document.UserData,
+        _ => null,
+    };
 
-        if (!VersionPattern().IsMatch(segments[0]))
-        {
-            await WriteAsync(context, StatusCodes.Status404NotFound, "Not found.");
-            return;
-        }
-
+    private async Task ServeAsync(HttpContext context, Document document)
+    {
+        // Even the version list waits on the host: cloud-init polls it until max_wait, then reads the rest at once.
         MetadataResponse response;
         try
         {
@@ -133,30 +136,28 @@ public sealed partial class MetadataApi(IHostChannel host, TimeProvider time, IL
                 return;
         }
 
-        var rest = segments.Skip(1).ToArray();
-        switch (rest)
+        switch (document)
         {
-            case []:
-                await WriteAsync(context, StatusCodes.Status200OK, response.UserData is null ? "meta-data" : "meta-data\nuser-data");
+            case Document.Versions:
+                await WriteAsync(context, StatusCodes.Status200OK, OpenStackDocuments.Latest);
                 break;
-            case ["user-data"] when response.UserData is { } userData:
-                context.Response.ContentType = "application/octet-stream";
-                await context.Response.Body.WriteAsync(Encoding.UTF8.GetBytes(userData), context.RequestAborted);
+            case Document.Files:
+                string?[] files =
+                [
+                    OpenStackDocuments.MetaData,
+                    response.NetworkData is null ? null : OpenStackDocuments.NetworkData,
+                    response.UserData is null ? null : OpenStackDocuments.UserData,
+                ];
+                await WriteAsync(context, StatusCodes.Status200OK, string.Join('\n', files.OfType<string>()));
                 break;
-            case ["meta-data", .. var inner]:
-                switch (Ec2Tree.Find(Ec2Tree.Build(response.InstanceId!, response.MetaData), inner))
-                {
-                    case Ec2Node.Leaf leaf:
-                        await WriteAsync(context, StatusCodes.Status200OK, leaf.Text);
-                        break;
-                    case Ec2Node.Directory directory:
-                        await WriteAsync(context, StatusCodes.Status200OK, Ec2Tree.List(directory));
-                        break;
-                    default:
-                        await WriteAsync(context, StatusCodes.Status404NotFound, "Not found.");
-                        break;
-                }
-
+            case Document.MetaData:
+                await WriteBytesAsync(context, JsonContentType, OpenStackDocuments.BuildMetaData(response.InstanceId!, response.MetaData));
+                break;
+            case Document.NetworkData when response.NetworkData is { } networkData:
+                await WriteBytesAsync(context, JsonContentType, Encoding.UTF8.GetBytes(networkData));
+                break;
+            case Document.UserData when response.UserData is { } userData:
+                await WriteBytesAsync(context, "application/octet-stream", Encoding.UTF8.GetBytes(userData));
                 break;
             default:
                 await WriteAsync(context, StatusCodes.Status404NotFound, "Not found.");
@@ -239,41 +240,12 @@ public sealed partial class MetadataApi(IHostChannel host, TimeProvider time, IL
         }
     }
 
-    /// <summary>
-    /// IMDSv2 sessions, which cloud-init asks for first. A token needs a PUT with a custom header, which a request
-    /// forged by another program or a web page cannot usually send. Tokens are the expiry and its HMAC, so nothing is
-    /// stored and any number of callers cost nothing. A restart makes them invalid; callers get a 401 and ask again.
-    /// </summary>
-    private async Task IssueTokenAsync(HttpContext context)
+    private static async Task WriteBytesAsync(HttpContext context, string contentType, byte[] body)
     {
-        if (!int.TryParse(context.Request.Headers[TokenTtlHeader], NumberStyles.None, CultureInfo.InvariantCulture, out var ttl)
-            || ttl is < 1 or > MaxTokenTtlSeconds)
-        {
-            await WriteAsync(context, StatusCodes.Status400BadRequest, $"{TokenTtlHeader} must be 1 to {MaxTokenTtlSeconds}.");
-            return;
-        }
-
-        var expires = time.GetUtcNow().ToUnixTimeSeconds() + ttl;
-        context.Response.Headers[TokenTtlHeader] = ttl.ToString(CultureInfo.InvariantCulture);
-        await WriteAsync(context, StatusCodes.Status200OK, $"{expires}.{Sign(expires)}");
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = contentType;
+        await context.Response.Body.WriteAsync(body, context.RequestAborted);
     }
-
-    private bool HasAcceptableToken(HttpRequest request)
-    {
-        if (!request.Headers.TryGetValue(TokenHeader, out var values))
-        {
-            return true;
-        }
-
-        var parts = values.ToString().Split('.');
-        return parts.Length == 2
-            && long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var expires)
-            && expires > time.GetUtcNow().ToUnixTimeSeconds()
-            && CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(parts[1]), Encoding.ASCII.GetBytes(Sign(expires)));
-    }
-
-    private string Sign(long expires) =>
-        WebEncoders.Base64UrlEncode(HMACSHA256.HashData(tokenKey, Encoding.ASCII.GetBytes(expires.ToString(CultureInfo.InvariantCulture))));
 
     private static async Task WriteAsync(HttpContext context, int status, string text)
     {
