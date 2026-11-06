@@ -21,6 +21,7 @@ try
         ["key", "create", .. var rest] => Commands.KeyCreate(rest),
         ["key", "show"] => Commands.KeyShow(),
         ["once", .. var rest] => await Commands.OnceAsync(rest),
+        ["metadata", "serve", .. var rest] => Commands.MetadataServe(rest),
         ["metadata", "show", "--vm", var vm] => await Commands.MetadataShowAsync(vm),
         ["metadata", "finish", "--vm", var vm, "--result", var result] => await Commands.MetadataFinishAsync(vm, result),
         ["metadata", "new-instance-id", "--vm", var vm] => await Commands.MetadataNewInstanceIdAsync(vm),
@@ -49,6 +50,8 @@ internal static class Commands
         proof-refresher key show             Print the host key's allowlist entry and who may use it.
         proof-refresher once [--vm <name or id>]
                                              Write a token to every running VM (or one VM) now, and report.
+        proof-refresher metadata serve       Serve instance metadata to this host's VMs (as the proof-metadata-host
+                                             Windows service or in the console). It does not use the host key.
         proof-refresher metadata show --vm <name or id>
                                              Check a VM's metadata block and say what it would serve, without
                                              printing sensitive values.
@@ -57,12 +60,12 @@ internal static class Commands
                                              status and clear the sensitive values.
         proof-refresher metadata new-instance-id --vm <name or id>
                                              Give a VM that is off a new BIOS GUID, and so a new instance ID.
-        proof-refresher service grant        Run the installed service as its virtual account, NT SERVICE\proof-refresher,
-                                             and give that account what it needs: Hyper-V Administrators, read on
-                                             the host key, and its event log source. Also register the instance
-                                             metadata socket with Hyper-V. The MSI runs it; run it again after
-                                             creating a new host key.
-        proof-refresher service revoke       Take the account out of Hyper-V Administrators, and unregister the socket.
+        proof-refresher service grant        Run the installed services, proof-refresher and proof-metadata-host, as
+                                             their virtual accounts, and give those accounts what they need:
+                                             Hyper-V Administrators, the event log source and, for proof-refresher
+                                             alone, read on the host key. Also register the instance metadata socket
+                                             with Hyper-V. The MSI runs it; run it again after creating a new host key.
+        proof-refresher service revoke       Take the accounts out of Hyper-V Administrators, and unregister the socket.
         proof-refresher --version            Print the version.
 
         Settings come from appsettings.json next to the executable, then %ProgramData%\Proof\refresher.json,
@@ -85,18 +88,33 @@ internal static class Commands
     public static int Run(string[] args)
     {
         var builder = CreateBuilder(args);
-        builder.Services.AddWindowsService(options => options.ServiceName = "proof-refresher");
+        builder.Services.AddWindowsService(options => options.ServiceName = ServiceAccess.ServiceName);
         builder.Services.AddHostedService<Worker>();
+
+        using var host = builder.Build();
+        return RunHost(host, services => services.GetRequiredService<HostTokenSigner>());
+    }
+
+    /// <summary>The guest-facing service. It is apart from <see cref="Run"/> so that what guests reach cannot use the host key.</summary>
+    public static int MetadataServe(string[] args)
+    {
+        var builder = CreateBuilder(args);
+        builder.Services.AddWindowsService(options => options.ServiceName = ServiceAccess.MetadataServiceName);
         builder.Services.AddSingleton<MetadataRequestHandler>();
         builder.Services.AddHostedService<MetadataServer>();
 
         using var host = builder.Build();
+        return RunHost(host, _ => { });
+    }
+
+    private static int RunHost(IHost host, Action<IServiceProvider> verify)
+    {
         // Fail at startup, not on the first pass, if the settings or the host key are wrong. Log it too, because a
         // service has no console: under the service host the logger writes to the Application event log.
         try
         {
             VerifyMachineSettings();
-            host.Services.GetRequiredService<HostTokenSigner>();
+            verify(host.Services);
         }
         catch (Exception ex)
         {
@@ -158,13 +176,17 @@ internal static class Commands
 
     public static int ServiceGrant()
     {
-        var account = ServiceAccess.Account.Value;
-        var sid = ServiceAccess.AccountSid();
-        ServiceAccess.RunAsVirtualAccount();
-        Console.Error.WriteLine($"The {ServiceAccess.ServiceName} service runs as {account}.");
-        Console.Error.WriteLine(ServiceAccess.AddToHyperVAdministrators(sid)
-            ? $"Added {account} to Hyper-V Administrators."
-            : $"{account} is already in Hyper-V Administrators.");
+        foreach (var service in ServiceAccess.ServiceNames)
+        {
+            var serviceAccount = ServiceAccess.AccountOf(service).Value;
+            var serviceSid = ServiceAccess.AccountSid(service);
+            ServiceAccess.RunAsVirtualAccount(service);
+            Console.Error.WriteLine($"The {service} service runs as {serviceAccount}.");
+            Console.Error.WriteLine(ServiceAccess.AddToHyperVAdministrators(serviceSid)
+                ? $"Added {serviceAccount} to Hyper-V Administrators."
+                : $"{serviceAccount} is already in Hyper-V Administrators.");
+        }
+
         Console.Error.WriteLine(ServiceAccess.EnsureEventSource()
             ? $"Registered the event log source '{ServiceAccess.ServiceName}'."
             : $"The event log source '{ServiceAccess.ServiceName}' is already registered.");
@@ -191,7 +213,8 @@ internal static class Commands
             return 0;
         }
 
-        Console.Error.WriteLine(HostKeyStore.GrantRead(options.HostKeyName, sid)
+        var account = ServiceAccess.AccountOf(ServiceAccess.ServiceName).Value;
+        Console.Error.WriteLine(HostKeyStore.GrantRead(options.HostKeyName, ServiceAccess.AccountSid(ServiceAccess.ServiceName))
             ? $"Granted {account} read on host key '{options.HostKeyName}'."
             : $"{account} can already use host key '{options.HostKeyName}'.");
         return 0;
@@ -199,10 +222,14 @@ internal static class Commands
 
     public static int ServiceRevoke()
     {
-        var account = ServiceAccess.Account.Value;
-        Console.Error.WriteLine(ServiceAccess.RemoveFromHyperVAdministrators(ServiceAccess.AccountSid())
-            ? $"Removed {account} from Hyper-V Administrators."
-            : $"{account} was not in Hyper-V Administrators.");
+        foreach (var service in ServiceAccess.ServiceNames)
+        {
+            var account = ServiceAccess.AccountOf(service).Value;
+            Console.Error.WriteLine(ServiceAccess.RemoveFromHyperVAdministrators(ServiceAccess.AccountSid(service))
+                ? $"Removed {account} from Hyper-V Administrators."
+                : $"{account} was not in Hyper-V Administrators.");
+        }
+
         Console.Error.WriteLine(ServiceAccess.UnregisterMetadataSocket()
             ? "Unregistered the instance metadata socket."
             : "The instance metadata socket was not registered.");
@@ -225,14 +252,14 @@ internal static class Commands
             {
                 Console.WriteLine(LoadOptions().UnsetMetadataHandler == UnsetMetadataHandlers.NotFound
                     ? "No metadata block, and Proof:UnsetMetadataHandler is 404: it gets 404."
-                    : "No metadata block: it gets its instance ID and local-hostname only.");
+                    : "No metadata block: it gets its instance ID (uuid) and hostname only.");
                 return 0;
             }
 
             Console.WriteLine($"Provisioning {block.Provisioning}");
             Console.WriteLine($"Sensitive    {block.SensitiveCount} values not yet cleared");
             var response = block.ToResponse(MetadataRequestHandler.InstanceIdFor(vm.BiosGuid), MetadataRequestHandler.HostnameFrom(vm.Name));
-            Console.WriteLine($"Serves       {string.Join(", ", response.MetaData!.Value.EnumerateObject().Select(p => p.Name))}{(response.UserData is null ? "" : ", user-data")}");
+            Console.WriteLine($"Serves       {string.Join(", ", VmMetadataBlock.ServedNames(response))}");
             return 0;
         }
         catch (VmMetadataException ex)

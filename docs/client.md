@@ -98,24 +98,34 @@ If `proof` reports no host token, check that the refresher is running on the hos
 
 ## Instance metadata
 
-`proof-metadata` listens on `127.0.0.1:8169` inside the VM and serves an EC2-compatible metadata API. It fetches the data from the host over a Hyper-V socket, so it works before the VM has any network. It starts before cloud-init and needs no configuration. You write the data into the VM's notes on the host; see the [refresher](refresher.md#instance-metadata) page.
+`proof-metadata` listens on `127.0.0.1:8169` inside the VM and serves OpenStack's metadata API: `meta_data.json`, `user_data` and `network_data.json` under `/openstack/latest`. It fetches the data from the host over a Hyper-V socket, so it works before the VM has any network, and `network_data.json` can give the VM a static address with no DHCP anywhere. It starts before cloud-init and needs no configuration. You write the data into the VM's notes on the host; see the [refresher](refresher.md#instance-metadata) page.
 
 Linux images also need the `hv_sock` kernel module, which the package loads at boot. On Ubuntu's generic kernels it comes from `linux-modules-extra`.
 
+Only the `latest` version is served. Cloudbase-Init sends the password it sets back to the metadata service if the dated version `2013-04-04` exists, and nothing a guest sends is ever stored.
+
 ### cloud-init
 
-Tell cloud-init to use it in `/etc/cloud/cloud.cfg.d/90-proof.cfg`:
+The package includes a cloud-init data source for it, `Proof`. Turn it on in `/etc/cloud/cloud.cfg.d/99-proof.cfg`:
 
 ```yaml
-datasource_list: [Ec2, None]
-datasource:
-  Ec2:
-    metadata_urls: ["http://127.0.0.1:8169"]
-    strict_id: false
-    max_wait: 60
+datasource_pkg_list: [proof_cloudinit]
+datasource_list: [Proof]
 ```
 
-Listing `Ec2` first is important. Cloud-init's platform detection would otherwise skip it on Hyper-V.
+- **List it alone.** With a single entry, cloud-init skips detecting the platform, and with no `None` after it, a VM that can't reach its host fails closed instead of booting unconfigured. This needs cloud-init 23.4 or later, as in Debian 13 and Ubuntu 24.04.
+- It waits up to 2 minutes for the host. Settings go under `datasource: Proof:` and are cloud-init's usual `max_wait`, `timeout` and `retries`.
+
+The data source is cloud-init's own OpenStack data source with two changes, both because the metadata is on loopback rather than on the network:
+
+- **No DHCP.** OpenStack's takes a temporary DHCP lease before it reads the metadata. Proof's reads it in cloud-init's first stage, before the network starts, on any network, so the static configuration in `network_data.json` is in place when the network comes up. The first boot of a Debian 13 VM took about a minute and a half with or without DHCP on the network, against 4 minutes without DHCP for OpenStack's.
+- **No EC2.** OpenStack's also reads EC2's metadata from `169.254.169.254`, which nothing answers on Hyper-V. Proof's doesn't, so nothing is sent to the default gateway, and `cloud-init status` isn't marked `degraded`.
+
+Everything else, including how `network_data.json` becomes the network configuration, is cloud-init's. The links name each adapter by MAC address, so give the VM's adapters static MACs on the host.
+
+Later boots reuse cloud-init's cache, so they keep the static address and don't need the host. Cloud-init reuses the cache only while the instance ID matches the VM's SMBIOS UUID, which it does unless you change the VM's BIOS GUID.
+
+The data source builds on parts of cloud-init that aren't a stable interface, so boot a VM from each new image to check it, as for any image change. Cloud-init's OpenStack data source also reads Proof's metadata, with `datasource_list: [OpenStack]` and `metadata_urls: ["http://127.0.0.1:8169"]`, but with the DHCP and EC2 behavior above.
 
 Have your user data report when it is done, so the host can clear any secrets it was given:
 
@@ -132,11 +142,18 @@ In `cloudbase-init.conf`:
 
 ```ini
 [DEFAULT]
-metadata_services=cloudbaseinit.metadata.services.ec2service.EC2Service
+metadata_services=cloudbaseinit.metadata.services.httpservice.HttpService
+plugins=cloudbaseinit.plugins.common.networkconfig.NetworkConfigPlugin,cloudbaseinit.plugins.common.sethostname.SetHostNamePlugin,cloudbaseinit.plugins.common.setuserpassword.SetUserPasswordPlugin,cloudbaseinit.plugins.windows.extendvolumes.ExtendVolumesPlugin,cloudbaseinit.plugins.common.userdata.UserDataPlugin
+username=Administrator
+inject_user_password=true
+first_logon_behaviour=no
 
-[ec2]
+[openstack]
 metadata_base_url=http://127.0.0.1:8169/
+add_metadata_private_ip_route=false
 ```
+
+`NetworkConfigPlugin` applies `network_data.json` before `UserDataPlugin` runs your user data, so the network is up before, for example, a domain join. With `inject_user_password`, `SetUserPasswordPlugin` sets the Administrator password from `admin_pass` in the meta-data. This configuration has not yet been tried on a Windows guest.
 
 Cloudbase-Init has no equivalent of `phone_home`, so finish your user data with a report:
 
@@ -149,8 +166,9 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8169/proof/v1/provisioning/compl
 In a VM whose notes contain a metadata block:
 
 ```sh
-curl http://127.0.0.1:8169/latest/meta-data/instance-id
-curl http://127.0.0.1:8169/latest/user-data
+curl http://127.0.0.1:8169/openstack/latest/meta_data.json
+curl http://127.0.0.1:8169/openstack/latest/network_data.json
+curl http://127.0.0.1:8169/openstack/latest/user_data
 ```
 
 A `503` means the host can't be reached or can't serve this VM yet, and the refresher's log on the host says why. Clients retry it.

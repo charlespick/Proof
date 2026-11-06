@@ -55,7 +55,8 @@ If you know the EC2 instance metadata service (IMDS), you already know most of P
 | Needs a network? | Yes, a virtual one | No. Provisioning works on a VM with no network adapter |
 | How the platform knows which VM is asking | The hypervisor's network knows which instance owns the connection | The hypervisor reports the calling VM's ID on every socket connection |
 | Who can read it inside the instance | Any process, unless blocked locally | Any process |
-| Request protection | IMDSv2 requires a session token and refuses forwarded requests | Refuses requests that look forwarded or browser-originated; accepts IMDSv2-style tokens but does not require them |
+| Format | EC2's own | OpenStack's, which cloud-init and Cloudbase-Init both read with static network configuration |
+| Request protection | IMDSv2 requires a session token and refuses forwarded requests | Refuses requests that look forwarded or browser-originated. OpenStack's clients send no session token, so none is asked for |
 | Credentials | Temporary IAM role credentials | A JWT you exchange for the audience you need |
 | Secrets in user data | Remain readable for the life of the instance | Marked `!sensitive`, then erased from the VM's notes once provisioning finishes |
 
@@ -67,12 +68,14 @@ Two things are different on purpose. First, there is no network path, so there i
 
 The VM's `proof-metadata` service doesn't hold any data. It forwards each request to the refresher on the host over a Hyper-V socket (`AF_HYPERV` on Windows, `AF_VSOCK` on Linux).
 
-A request has no field for "who am I". Instead, the hypervisor itself reports the ID of the VM that opened each connection. The refresher uses only that ID to find the VM's notes, and it never reads an identity from the contents of a request. A VM can therefore only ever ask for its own data. It can't name another VM or alter the ID it connects with.
+A request has no field for "who am I". Instead, the hypervisor itself reports the ID of the VM that opened each connection. The host uses only that ID to find the VM's notes, and it never reads an identity from the contents of a request. A VM can therefore only ever ask for its own data. It can't name another VM or alter the ID it connects with.
 
 The rest of the host-side protections treat the guest as untrusted:
 
-- Requests are tiny (1 KB at most), connections are limited to 64 at once and 30 seconds each, and each VM is limited to 120 requests a minute.
-- Nothing a guest sends is ever written to the notes. Reporting that provisioning has finished carries one of two fixed words, and the host writes its own text.
+- Requests are tiny (1 KB at most). A guest has 5 seconds to send its request, and a connection lasts 30 seconds at most.
+- Each VM is limited to 4 connections at once and 120 a minute, both checked before anything is read from the guest. The host takes 64 connections at once across all VMs. One VM can't use up those connections, but about 16 compromised VMs working together could delay metadata for the others. This only affects availability, and it doesn't affect tokens.
+- The service that talks to guests, `proof-metadata-host`, runs apart from the one that signs tokens and has no access to the host key. A bug in the code guests reach doesn't hand over the key directly. The two are not a hard boundary: its account is still in Hyper-V Administrators, which it needs for VMs' notes, so a compromise of it can read and change any VM's settings, including secrets in notes. Treat that group as close to host administrator.
+- Nothing a guest sends is ever written to the notes. Reporting that provisioning has finished carries one of two fixed words, and the host writes its own text. OpenStack's password endpoint, where Cloudbase-Init would post the password it set, isn't served.
 - A notes block that doesn't parse, uses an unknown tag or key, or uses YAML anchors serves nothing and is logged. A mistyped `!sensitive` can't silently turn a secret into an ordinary value that stays in the notes forever.
 - The host verifies its edit before saving. If a secret would remain or the status would be wrong, it writes nothing and the guest can retry.
 

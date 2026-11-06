@@ -25,6 +25,7 @@ src/
 tests/Proof.Tests/
 installer/            Windows MSIs (WiX 5)
 packaging/debian/     the Linux client .deb
+packaging/cloud-init/ the cloud-init data source in the .deb, and its test
 build/                version calculation
 docs/                 user documentation
 ```

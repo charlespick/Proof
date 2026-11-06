@@ -9,18 +9,21 @@ using Proof.Shared;
 namespace Proof.Refresher;
 
 /// <summary>
-/// What the service's virtual account, <c>NT SERVICE\proof-refresher</c>, needs beyond an ordinary account
-///: membership of Hyper-V Administrators for the WMI KVP methods and VM events, read on the host key,
-/// and an event log source registered for it, since only an administrator can register one. The MSI switches the
-/// service to the account and grants these after it installs the service, and revokes the group membership when it
-/// removes it.
+/// What the services' virtual accounts need beyond an ordinary account. <c>NT SERVICE\proof-refresher</c> needs
+/// membership of Hyper-V Administrators for the WMI KVP methods and VM events, and read on the host key.
+/// <c>NT SERVICE\proof-metadata-host</c>, which talks to guests, needs the membership for VMs' notes and never gets the
+/// key. Both log to an event log source registered for them, since only an administrator can register one. The MSI
+/// switches the services to the accounts and grants these after it installs the services, and revokes the group
+/// membership when it removes them.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public static class ServiceAccess
 {
     public const string ServiceName = "proof-refresher";
 
-    public static readonly NTAccount Account = new($@"NT SERVICE\{ServiceName}");
+    public const string MetadataServiceName = "proof-metadata-host";
+
+    public static readonly IReadOnlyList<string> ServiceNames = [ServiceName, MetadataServiceName];
 
     /// <summary>BUILTIN\Hyper-V Administrators, whose name is localized.</summary>
     private static readonly SecurityIdentifier HyperVAdministrators = new("S-1-5-32-578");
@@ -32,16 +35,19 @@ public static class ServiceAccess
     private const int ErrorNoSuchAlias = 1376;
     private const int NerrGroupNotFound = 2220;
 
+    public static NTAccount AccountOf(string serviceName) => new($@"NT SERVICE\{serviceName}");
+
     /// <summary>The virtual account's SID. It resolves only while the service is installed.</summary>
-    public static SecurityIdentifier AccountSid()
+    public static SecurityIdentifier AccountSid(string serviceName)
     {
+        var account = AccountOf(serviceName);
         try
         {
-            return (SecurityIdentifier)Account.Translate(typeof(SecurityIdentifier));
+            return (SecurityIdentifier)account.Translate(typeof(SecurityIdentifier));
         }
         catch (IdentityNotMappedException)
         {
-            throw new InvalidOperationException($"{Account.Value} was not found. It exists once the {ServiceName} service is installed.");
+            throw new InvalidOperationException($"{account.Value} was not found. It exists once the {serviceName} service is installed.");
         }
     }
 
@@ -51,7 +57,7 @@ public static class ServiceAccess
     /// Local System and this switches it before it first starts. A virtual account has no password, and the password
     /// must be null: an empty string fails with error 1057.
     /// </summary>
-    public static void RunAsVirtualAccount()
+    public static void RunAsVirtualAccount(string serviceName)
     {
         using var manager = OpenSCManager(null, null, ScManagerConnect);
         if (manager.IsInvalid)
@@ -59,15 +65,16 @@ public static class ServiceAccess
             throw new InvalidOperationException($"Cannot open the service control manager: error {Marshal.GetLastPInvokeError()}.");
         }
 
-        using var service = OpenService(manager, ServiceName, ServiceChangeConfig);
+        using var service = OpenService(manager, serviceName, ServiceChangeConfig);
         if (service.IsInvalid)
         {
-            throw new InvalidOperationException($"Cannot open the {ServiceName} service: error {Marshal.GetLastPInvokeError()}.");
+            throw new InvalidOperationException($"Cannot open the {serviceName} service: error {Marshal.GetLastPInvokeError()}.");
         }
 
-        if (!ChangeServiceConfig(service, ServiceNoChange, ServiceNoChange, ServiceNoChange, null, null, IntPtr.Zero, null, Account.Value, null, null))
+        var account = AccountOf(serviceName).Value;
+        if (!ChangeServiceConfig(service, ServiceNoChange, ServiceNoChange, ServiceNoChange, null, null, IntPtr.Zero, null, account, null, null))
         {
-            throw new InvalidOperationException($"Cannot set the {ServiceName} service to run as {Account.Value}: error {Marshal.GetLastPInvokeError()}.");
+            throw new InvalidOperationException($"Cannot set the {serviceName} service to run as {account}: error {Marshal.GetLastPInvokeError()}.");
         }
     }
 
