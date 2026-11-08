@@ -26,7 +26,6 @@ public sealed class AllowlistParserTests
         var key = Assert.Single(list.Keys.Values);
         Assert.Equal(host.Kid, key.Kid);
         Assert.Equal("hv-host-01", key.Host);
-        Assert.Equal("prod", key.Cluster);
         Assert.Equal(HostKeyStatus.Active, key.Status);
         Assert.Equal(new DateTimeOffset(2027, 7, 1, 0, 0, 0, TimeSpan.Zero), key.NotAfter);
         Assert.Equal(64, list.Sha256.Length);
@@ -114,14 +113,14 @@ public sealed class AllowlistParserTests
     [InlineData("host:hv-01")]
     [InlineData("-hv-host-01")]
     [InlineData("hv host 01")]
-    public void RefusesHostNamesASubjectCannotHold(string name) =>
+    [InlineData("hv-host-01\\n")]
+    public void RefusesHostNamesOutsideTheRule(string name) =>
         AssertRefused(TestHost.Allowlist(host.AllowlistEntry()).Replace("host: hv-host-01", $"host: \"{name}\""), "must be 1 to 253 letters");
 
-    [Theory]
-    [InlineData("prod/east")]
-    [InlineData("cluster:prod")]
-    public void RefusesClusterNamesASubjectCannotHold(string name) =>
-        AssertRefused(TestHost.Allowlist(host.AllowlistEntry(clusterOverride: $"\"{name}\"")), "must be 1 to 253 letters");
+    [Fact]
+    public void RefusesTheRemovedClusterField() =>
+        // Unknown fields are errors, so an entry from before cluster was removed is caught rather than half read.
+        AssertRefused(TestHost.Allowlist(host.AllowlistEntry().Replace("    keys:", "    cluster: prod\n    keys:")), "cluster");
 
     [Fact]
     public void RefusesHostWithoutKeys() =>

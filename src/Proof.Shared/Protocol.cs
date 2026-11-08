@@ -8,11 +8,20 @@ namespace Proof.Shared;
 /// <summary>Claim names Proof adds to the registered JWT claims.</summary>
 public static class ProofClaimNames
 {
+    /// <summary>The tenant from the VM's <c>identity:</c> block. In host tokens and issued JWTs.</summary>
+    public const string Tenant = "tenant";
+
+    /// <summary>The assigned ID from the VM's <c>identity:</c> block. In host tokens and issued JWTs.</summary>
+    public const string AssignedId = "assigned_id";
+
+    /// <summary>The security tags from the VM's <c>identity:</c> block: an array of strings, always present, possibly empty.</summary>
+    public const string SecurityTags = "security_tags";
+
+    /// <summary>The VM ID in issued JWTs, whose <c>sub</c> is the composite subject. Host tokens carry it as <c>sub</c>.</summary>
+    public const string VmId = "vm_id";
+
     /// <summary>VM name at signing time. Host-asserted and informational.</summary>
     public const string VmName = "vm_name";
-
-    /// <summary>Cluster name. Host-asserted; optionally scoped against the allowlist.</summary>
-    public const string Cluster = "cluster";
 
     /// <summary>Host ID that signed the host token, copied into issued JWTs. Informational.</summary>
     public const string Host = "host";
@@ -82,30 +91,27 @@ public static class ProofIssuerUrl
 }
 
 /// <summary>
-/// Host and cluster names, as the refresher is configured and the allowlist lists them: letters, digits, dot, hyphen
-/// and underscore, so they paste into YAML as they are and never contain the <c>/</c> or <c>:</c> of a subject.
+/// Host IDs, as the refresher is configured and the allowlist lists them: letters, digits, dot, hyphen and
+/// underscore, so they paste into YAML as they are.
 /// </summary>
 public static partial class ProofNames
 {
-    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")]
+    [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}\z")]
     private static partial Regex Pattern();
 
     public static bool IsValid([NotNullWhen(true)] string? name) => name is not null && Pattern().IsMatch(name);
 }
 
 /// <summary>
-/// The <c>sub</c> of issued JWTs. Hyper-V keeps VM IDs unique within a failover cluster, or within a standalone host,
-/// but not across them: an import or a restore keeps the ID it had. So the VM ID is scoped by the cluster, or by the
-/// host when it is in no cluster, as the issuer's allowlist records it. The host token's own claims never choose it.
+/// The <c>sub</c> of issued JWTs: <c>tenant:&lt;tenant&gt;:assignedID:&lt;assignedID&gt;:vmID:&lt;vmID&gt;</c>. The
+/// format is part of Proof's contract, so that consumers that can only match patterns in <c>sub</c> can authorize on
+/// it. No value can hold a <c>:</c> (<see cref="VmIdentity"/>), so a pattern that ends with the delimiter, such as
+/// <c>tenant:acme:*</c>, never also matches tenant <c>acme-corp</c>.
 /// </summary>
 public static class ProofSubjects
 {
-    public const string ClusterPrefix = "cluster:";
-    public const string HostPrefix = "host:";
-
-    /// <summary><c>cluster:&lt;cluster&gt;/&lt;vmid&gt;</c>, or <c>host:&lt;host&gt;/&lt;vmid&gt;</c> for a host in no cluster.</summary>
-    public static string For(string host, string? cluster, string vmId) =>
-        cluster is not null ? $"{ClusterPrefix}{cluster}/{vmId}" : $"{HostPrefix}{host}/{vmId}";
+    public static string For(VmIdentity identity, string vmId) =>
+        $"tenant:{identity.Tenant}:assignedID:{identity.AssignedId}:vmID:{vmId}";
 }
 
 public static class ProofTokenIds

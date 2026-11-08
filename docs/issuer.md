@@ -30,7 +30,6 @@ The allowlist is the issuer's list of trusted Hyper-V hosts, identified by publi
 version: 1
 hosts:
   - host: hv-host-01
-    cluster: prod            # omit for a standalone host
     keys:
       - kid: <thumbprint>
         status: active       # active or retired
@@ -40,7 +39,7 @@ hosts:
 
 You don't write these entries by hand. The [refresher](refresher.md) prints a ready-made entry for its host with `proof-refresher key show`.
 
-- Give every host in a Hyper-V failover cluster the same `cluster` name, and give standalone hosts none. A VM's identity includes its cluster, so a VM keeps its identity when it live-migrates within the cluster.
+- Every host on one allowlist is part of one trust environment, run by one operator. Any of them may vouch for any tenant or tag, and a VM keeps its identity wherever it runs, because the identity comes from its notes, not from the host. See [security](security.md#vm-identity-and-who-sets-it).
 - A key marked `retired` still works until its `not_after` date, which is how you rotate keys gracefully. To stop trusting a key immediately, delete it.
 - The issuer rereads the file every 10 seconds. If an edit makes the file invalid, the issuer keeps using the last good version and logs why.
 
@@ -177,9 +176,37 @@ Proof__IssuerUrl=https://id.example.com Proof__AllowlistPath=allowlist.yaml \
 
 ## What consumers need to know
 
-Services that accept Proof tokens need no Proof-specific code. Anything that supports OIDC or JWT validation works. Point it at the issuer URL, require the audience your service expects, and use the `sub` claim as the VM's identity.
+Services that accept Proof tokens need no Proof-specific code. Anything that supports OIDC or JWT validation works. Point it at the issuer URL, require the audience your service expects, and match on `sub` or on the identity claims.
 
-`sub` has the form `cluster:<cluster>/<vm-id>`, or `host:<host>/<vm-id>` for a VM on a standalone host. Treat it as an opaque string. Other claims (`vm_name`, `host`, `cluster`) are informational. Don't make authorization decisions from them.
+### Claims
+
+| Claim | Value |
+| ----- | ----- |
+| `sub` | `tenant:<tenant>:assignedID:<assigned-id>:vmID:<vm-id>`, described below |
+| `tenant` | The tenant from the VM's [`identity:` block](refresher.md#vm-identity) |
+| `assigned_id` | The assigned ID from that block: a hostname, an FQDN or any other label the operator chose |
+| `vm_id` | The Hyper-V VM ID, a lowercase hyphenated GUID |
+| `security_tags` | An array of strings from that block. Always present, and empty when the VM has no tags |
+| `host` | The allowlisted host that vouched for the VM. Informational |
+| `vm_name` | The VM's name in Hyper-V. Informational, mutable, and left out if it didn't fit |
+
+`iss`, `aud`, `exp`, `nbf`, `iat` and `jti` are the registered claims. The discovery document lists all of these in `claims_supported`.
+
+The tenant, assigned ID and VM ID are claims of their own as well as parts of `sub`, so a consumer that maps claims never needs to parse the subject. Don't authorize on `host` or `vm_name`.
+
+### The subject format
+
+The subject is part of Proof's contract, not an opaque string, so that workload-identity systems that can only match patterns in `sub` can authorize on it. For example:
+
+```
+tenant:acme:assignedID:web01.prod.example.com:vmID:2f1c6a8e-4b7d-4e0a-9d3f-6c5b8a7e1d20
+```
+
+Tenants, assigned IDs and tags are made of lowercase letters, digits, `.`, `-` and `_`, so no value can contain the `:` delimiter. Match with the delimiter after the value: `tenant:acme:*` matches every VM in tenant `acme` and nothing in `acme-corp`, and `tenant:acme:assignedID:web01.prod.example.com:*` matches that assigned ID on any VM.
+
+Proof doesn't enforce that a tenant and assigned ID pair is unique. Two VMs given the same pair get different VM IDs, and so different subjects; a pattern that ends after the assigned ID matches both. If you need exactly one VM, match the whole subject or check `vm_id`.
+
+These values are assertions made by whoever can write the VM's notes. Proof is an identity provider, not an authorization system: your service decides what a VM with a given tenant, assigned ID and tags may do.
 
 The endpoints are:
 
@@ -203,7 +230,8 @@ Some cloud providers fetch the discovery document and keys over the public inter
 
 - **Clocks matter.** Keep the issuer, hosts and consumers on NTP. Tokens are checked with two minutes of tolerance.
 - **Monitoring.** The issuer emits metrics on the `Proof.Issuer` meter: exchanges by outcome and allowlist reload failures.
-- **Revocation.** Removing a key from the allowlist stops new tokens immediately. Tokens already issued stay valid until they expire, at most ten minutes.
+- **Revocation.** Removing a key from the allowlist stops new tokens immediately. Tokens already issued stay valid until they expire, at most ten minutes. The same holds when a VM's identity changes or is removed: see [security](security.md#vm-identity-and-who-sets-it).
+- **Refusals.** The log gives the reason for each refused exchange. `MissingIdentity` means the host token has no `tenant` or `assigned_id`, which comes from a host whose refresher is older than the issuer. `InvalidIdentity` means its identity values break the rules above; the issuer refuses them rather than correcting them.
 - **Back up the signing key.** Losing it means issuing a new one and rotating every consumer's trust.
 
 Next: [install the refresher](refresher.md) on your Hyper-V hosts.

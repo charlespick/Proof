@@ -11,34 +11,37 @@ public sealed class TestHost
 {
     public const string IssuerUrl = "https://proof.test";
     public const string VmId = "11111111-2222-3333-4444-555555555555";
+    public const string Tenant = "acme";
+    public const string AssignedId = "web01.prod.example.com";
+    public static readonly string[] SecurityTags = ["puppet", "ssh-ca"];
 
-    public TestHost(string hostId = "hv-host-01", string? cluster = "prod")
+    /// <summary>The <c>sub</c> the issuer gives the VM in <see cref="DefaultClaims"/>.</summary>
+    public const string Subject = $"tenant:{Tenant}:assignedID:{AssignedId}:vmID:{VmId}";
+
+    public TestHost(string hostId = "hv-host-01")
     {
         HostId = hostId;
-        Cluster = cluster;
         Key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         Jwk = ProofKeys.CreatePublicJwk(Key);
     }
 
     public string HostId { get; }
-    public string? Cluster { get; }
     public ECDsa Key { get; }
     public JsonWebKey Jwk { get; }
     public string Kid => Jwk.Kid;
 
-    /// <summary>The <c>sub</c> the issuer gives this host's VM: scoped by its cluster, or by the host when it has none.</summary>
-    public string Subject => Cluster is null ? $"host:{HostId}/{VmId}" : $"cluster:{Cluster}/{VmId}";
+    /// <summary>The identity in <see cref="DefaultClaims"/>.</summary>
+    public static VmIdentity Identity(string tenant = Tenant, string assignedId = AssignedId, string[]? securityTags = null)
+    {
+        Assert.True(VmIdentity.TryCreate(tenant, assignedId, securityTags ?? SecurityTags, out var identity, out var problem), problem);
+        return identity;
+    }
 
     /// <summary>This host's allowlist entry as YAML, indented to sit under <c>hosts:</c>.</summary>
-    public string AllowlistEntry(string status = "active", string? notAfter = null, string? clusterOverride = null)
+    public string AllowlistEntry(string status = "active", string? notAfter = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"  - host: {HostId}");
-        var cluster = clusterOverride ?? Cluster;
-        if (cluster is not null)
-        {
-            sb.AppendLine($"    cluster: {cluster}");
-        }
         sb.AppendLine("    keys:");
         sb.AppendLine($"      - kid: {Kid}");
         sb.AppendLine($"        status: {status}");
@@ -61,16 +64,15 @@ public sealed class TestHost
             [JwtRegisteredClaimNames.Iss] = HostId,
             [JwtRegisteredClaimNames.Aud] = IssuerUrl,
             [JwtRegisteredClaimNames.Sub] = VmId,
+            [ProofClaimNames.Tenant] = Tenant,
+            [ProofClaimNames.AssignedId] = AssignedId,
+            [ProofClaimNames.SecurityTags] = SecurityTags,
             [ProofClaimNames.VmName] = "web01",
             [JwtRegisteredClaimNames.Iat] = t,
             [JwtRegisteredClaimNames.Nbf] = t,
             [JwtRegisteredClaimNames.Exp] = t + (long)HostTokenPolicy.Lifetime.TotalSeconds,
             [JwtRegisteredClaimNames.Jti] = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16)),
         };
-        if (Cluster is not null)
-        {
-            claims[ProofClaimNames.Cluster] = Cluster;
-        }
         return claims;
     }
 

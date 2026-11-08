@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
@@ -8,14 +9,14 @@ using Proof.Shared;
 namespace Proof.Issuer;
 
 /// <summary>Who a verified host token says the VM is.</summary>
-/// <param name="Subject">The identity: the VM ID scoped by the signing host's cluster or host, from the allowlist (<see cref="ProofSubjects"/>).</param>
-/// <param name="VmId">The VM ID, a lowercase hyphenated GUID. Unique only within its cluster or host.</param>
+/// <param name="Subject">The composite subject built from <paramref name="Identity"/> and <paramref name="VmId"/> (<see cref="ProofSubjects"/>).</param>
+/// <param name="VmId">The VM ID, a lowercase hyphenated GUID.</param>
+/// <param name="Identity">The tenant, assigned ID and security tags the host signed, from the VM's notes.</param>
 /// <param name="Host">The allowlisted host that signed the token.</param>
 /// <param name="Kid">The host key that signed the token.</param>
 /// <param name="Jti">The host token's <c>jti</c>, for logs.</param>
 /// <param name="VmName">Host-asserted and informational.</param>
-/// <param name="Cluster">The signing host's cluster on the allowlist, which the host token's <c>cluster</c> matched.</param>
-public sealed record HostIdentity(string Subject, string VmId, string Host, string Kid, string Jti, string? VmName, string? Cluster);
+public sealed record HostIdentity(string Subject, string VmId, VmIdentity Identity, string Host, string Kid, string Jti, string? VmName);
 
 /// <summary>Why a host token was refused. Logged, never returned to the caller.</summary>
 public enum HostTokenFailure
@@ -33,7 +34,12 @@ public enum HostTokenFailure
     IssuedInFuture,
     LifetimeTooLong,
     InvalidSubject,
-    ClusterMismatch,
+
+    /// <summary>No <c>tenant</c> or <c>assigned_id</c>. The refresher signs no token without them, so the host's refresher predates them.</summary>
+    MissingIdentity,
+
+    /// <summary>Identity claims that are not canonical. The issuer refuses them rather than normalizing.</summary>
+    InvalidIdentity,
 }
 
 /// <param name="Detail">Extra context for logs, such as the library exception type. Never token content.</param>
@@ -136,8 +142,7 @@ public sealed class HostTokenValidator(AllowlistMonitor allowlist, IOptions<Issu
             || !jwt.TryGetPayloadValue<long>(JwtRegisteredClaimNames.Nbf, out _)
             || !jwt.TryGetPayloadValue<long>(JwtRegisteredClaimNames.Exp, out var exp)
             || string.IsNullOrEmpty(jwt.Id)
-            || !TryGetOptionalString(jwt, ProofClaimNames.VmName, out var vmName)
-            || !TryGetOptionalString(jwt, ProofClaimNames.Cluster, out var cluster))
+            || !TryGetOptionalString(jwt, ProofClaimNames.VmName, out var vmName))
         {
             return Fail(HostTokenFailure.InvalidClaim, kid: hostKey.Kid);
         }
@@ -157,17 +162,46 @@ public sealed class HostTokenValidator(AllowlistMonitor allowlist, IOptions<Issu
             return Fail(HostTokenFailure.InvalidSubject, kid: hostKey.Kid);
         }
 
-        // 7. The host's cluster, or its absence, as the allowlist records it. The subject is scoped by the allowlist
-        // entry alone; a host token that disagrees with it comes from a misconfigured host.
-        if (!string.Equals(cluster, hostKey.Cluster, StringComparison.Ordinal))
+        // 7. The identity, held to the refresher's rules. Every allowlisted host is in one trust environment, so it may
+        // assert any tenant or tag; what it may not do is send values the subject cannot carry unambiguously.
+        var failure = ReadIdentity(jwt, out var identity);
+        if (failure != HostTokenFailure.None)
         {
-            return Fail(HostTokenFailure.ClusterMismatch, kid: hostKey.Kid);
+            return Fail(failure, kid: hostKey.Kid);
         }
 
         return new HostTokenResult(
-            new HostIdentity(ProofSubjects.For(hostKey.Host, hostKey.Cluster, jwt.Subject), jwt.Subject, hostKey.Host, hostKey.Kid, jwt.Id, vmName, hostKey.Cluster),
+            new HostIdentity(ProofSubjects.For(identity!, jwt.Subject), jwt.Subject, identity!, hostKey.Host, hostKey.Kid, jwt.Id, vmName),
             HostTokenFailure.None,
             Kid: hostKey.Kid);
+    }
+
+    /// <summary>
+    /// <c>tenant</c> and <c>assigned_id</c> as JSON strings and <c>security_tags</c> as an array of JSON strings,
+    /// read from the payload itself so that a string can never pass for a one-tag array or the reverse.
+    /// </summary>
+    private static HostTokenFailure ReadIdentity(JsonWebToken jwt, out VmIdentity? identity)
+    {
+        identity = null;
+        using var payload = JsonDocument.Parse(Base64UrlEncoder.DecodeBytes(jwt.EncodedPayload));
+        var root = payload.RootElement;
+        if (!root.TryGetProperty(ProofClaimNames.Tenant, out var tenant) || !root.TryGetProperty(ProofClaimNames.AssignedId, out var assignedId))
+        {
+            return HostTokenFailure.MissingIdentity;
+        }
+
+        if (tenant.ValueKind != JsonValueKind.String
+            || assignedId.ValueKind != JsonValueKind.String
+            || !root.TryGetProperty(ProofClaimNames.SecurityTags, out var tags)
+            || tags.ValueKind != JsonValueKind.Array
+            || tags.EnumerateArray().Any(t => t.ValueKind != JsonValueKind.String)
+            || !VmIdentity.TryCreate(
+                tenant.GetString(), assignedId.GetString(), tags.EnumerateArray().Select(t => t.GetString()!).ToList(), out identity, out _))
+        {
+            return HostTokenFailure.InvalidIdentity;
+        }
+
+        return HostTokenFailure.None;
     }
 
     /// <summary>A VM ID in the one form Proof uses: a lowercase, hyphenated GUID.</summary>

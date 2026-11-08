@@ -49,12 +49,13 @@ internal static class Commands
                                              for example --grant "NT SERVICE\proof-refresher".
         proof-refresher key show             Print the host key's allowlist entry and who may use it.
         proof-refresher once [--vm <name or id>]
-                                             Write a token to every running VM (or one VM) now, and report.
+                                             Give every running VM (or one VM) the token its identity block calls
+                                             for now, removing the token of a VM with none, and report.
         proof-refresher metadata serve       Serve instance metadata to this host's VMs (as the proof-metadata-host
                                              Windows service or in the console). It does not use the host key.
         proof-refresher metadata show --vm <name or id>
-                                             Check a VM's metadata block and say what it would serve, without
-                                             printing sensitive values.
+                                             Check a VM's block and show its identity and what it would serve,
+                                             without printing sensitive values.
         proof-refresher metadata finish --vm <name or id> --result <complete|failed>
                                              Do what a VM reporting that it finished provisioning does: record the
                                              status and clear the sensitive values.
@@ -69,8 +70,8 @@ internal static class Commands
         proof-refresher --version            Print the version.
 
         Settings come from appsettings.json next to the executable, then %ProgramData%\Proof\refresher.json,
-        then environment variables (Proof__IssuerUrl, Proof__HostId, Proof__Cluster, Proof__HostKeyName,
-        Proof__ScanInterval, Proof__MetadataEnabled, Proof__UnsetMetadataHandler).
+        then environment variables (Proof__IssuerUrl, Proof__HostId, Proof__HostKeyName, Proof__ScanInterval,
+        Proof__MetadataEnabled, Proof__UnsetMetadataHandler).
         """;
 
     public static int Usage()
@@ -250,12 +251,16 @@ internal static class Commands
         {
             if (VmMetadataBlock.Find(vm.Notes) is not { } block)
             {
+                Console.WriteLine("Identity     none: no host token");
                 Console.WriteLine(LoadOptions().UnsetMetadataHandler == UnsetMetadataHandlers.NotFound
                     ? "No metadata block, and Proof:UnsetMetadataHandler is 404: it gets 404."
                     : "No metadata block: it gets its instance ID (uuid) and hostname only.");
                 return 0;
             }
 
+            Console.WriteLine(block.Identity is { } identity
+                ? $"Identity     {Proof.Shared.ProofSubjects.For(identity, vm.Id.ToString("D"))}, tags [{string.Join(", ", identity.SecurityTags)}]"
+                : "Identity     none: no host token");
             Console.WriteLine($"Provisioning {block.Provisioning}");
             Console.WriteLine($"Sensitive    {block.SensitiveCount} values not yet cleared");
             var response = block.ToResponse(MetadataRequestHandler.InstanceIdFor(vm.BiosGuid), MetadataRequestHandler.HostnameFrom(vm.Name));
@@ -264,7 +269,7 @@ internal static class Commands
         }
         catch (VmMetadataException ex)
         {
-            Console.Error.WriteLine($"The metadata block cannot be used. {ex.Message}");
+            Console.Error.WriteLine($"The block cannot be used, so the VM gets no host token and no metadata. {ex.Message}");
             return 1;
         }
     }
@@ -364,13 +369,19 @@ internal static class Commands
 
         foreach (var r in pass.Results)
         {
-            Console.WriteLine(r.Error is null
-                ? $"ok      {r.Vm.Id}  {r.Vm.Name}  jti {r.Jti}, expires {r.Expires:O}{(r.VmNameOmitted ? " (vm_name omitted)" : "")}"
-                : $"failed  {r.Vm.Id}  {r.Vm.Name}  {r.Error}");
+            Console.WriteLine(r.Outcome switch
+            {
+                VmTokenOutcome.Written =>
+                    $"ok      {r.Vm.Id}  {r.Vm.Name}  {Proof.Shared.ProofSubjects.For(r.Identity!, r.Vm.Id)}, tags [{string.Join(", ", r.Identity!.SecurityTags)}], "
+                    + $"jti {r.Jti}, expires {r.Expires:O}{(r.VmNameOmitted ? " (vm_name omitted)" : "")}",
+                VmTokenOutcome.NotEnrolled => $"none    {r.Vm.Id}  {r.Vm.Name}  no identity block in its notes, so no token",
+                VmTokenOutcome.Refused => $"refused {r.Vm.Id}  {r.Vm.Name}  no token. {r.Detail}",
+                _ => $"failed  {r.Vm.Id}  {r.Vm.Name}  {r.Detail}",
+            });
         }
 
-        Console.WriteLine($"{pass.Running} running, {pass.Written} written, {pass.Failed} failed.");
-        return pass.Failed == 0 ? 0 : 1;
+        Console.WriteLine($"{pass.Running} running, {pass.Written} written, {pass.Refused} refused, {pass.Failed} failed.");
+        return pass.Refused == 0 && pass.Failed == 0 ? 0 : 1;
     }
 
     private static HostApplicationBuilder CreateBuilder(string[] args)
@@ -408,7 +419,7 @@ internal static class Commands
 
     /// <summary>
     /// Refuses machine settings that someone other than SYSTEM or an administrator could have changed: they name the
-    /// host, its cluster and its key.
+    /// host and its key.
     /// </summary>
     private static void VerifyMachineSettings()
     {
@@ -448,11 +459,6 @@ internal static class Commands
         var jwk = Proof.Shared.ProofKeys.CreatePublicJwk(key);
         Console.Error.WriteLine("Add this entry under hosts: in the issuer allowlist (or add the key to this host's existing entry):");
         Console.WriteLine($"  - host: {options.HostId}");
-        if (options.Cluster is not null)
-        {
-            Console.WriteLine($"    cluster: {options.Cluster}");
-        }
-
         Console.WriteLine("    keys:");
         Console.WriteLine($"      - kid: {jwk.Kid}");
         Console.WriteLine("        status: active");

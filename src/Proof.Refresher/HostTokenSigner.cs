@@ -6,13 +6,12 @@ using Proof.Shared;
 
 namespace Proof.Refresher;
 
-/// <summary>A running VM on this host.</summary>
-/// <param name="Id">The VM ID as a lowercase hyphenated GUID.</param>
-/// <param name="Name">The VM name now. Mutable and informational.</param>
-public sealed record VirtualMachine(string Id, string Name);
-
 /// <summary>A signed host token and whether <c>vm_name</c> had to be left out to fit in one KVP value.</summary>
-public sealed record SignedHostToken(string Token, string Jti, DateTimeOffset Expires, bool VmNameOmitted);
+public sealed record SignedHostToken(string Token, string Jti, DateTimeOffset Expires, bool VmNameOmitted)
+{
+    /// <summary>False if the token is too long for one KVP value even without <c>vm_name</c>. It must not be written.</summary>
+    public bool Fits => Token.Length <= KvpLimits.MaxValueLength;
+}
 
 /// <summary>Signs host tokens with the host key. Microsoft.IdentityModel builds and signs the JWS.</summary>
 public sealed class HostTokenSigner
@@ -27,12 +26,13 @@ public sealed class HostTokenSigner
         Jwk = ProofKeys.CreatePublicJwk(hostKey);
         credentials = new SigningCredentials(new ECDsaSecurityKey(hostKey) { KeyId = Jwk.Kid }, ProofAlgorithms.Signing);
 
-        // Fail at startup, not per VM, if the fixed claims alone cannot fit in a KVP value.
-        var probe = Create(new VirtualMachine(Guid.Empty.ToString("D"), ""), DateTimeOffset.UnixEpoch, includeVmName: false);
+        // Fail at startup, not per VM, if the fixed claims and the least identity cannot fit in a KVP value.
+        VmIdentity.TryCreate("a", "a", [], out var least, out _);
+        var probe = Create(new VirtualMachine(Guid.Empty.ToString("D"), "", null), least!, DateTimeOffset.UnixEpoch, includeVmName: false);
         if (probe.Length > KvpLimits.MaxValueLength)
         {
             throw new InvalidOperationException(
-                $"A host token without vm_name is {probe.Length} characters, over the {KvpLimits.MaxValueLength}-character KVP limit. Shorten Proof:IssuerUrl, Proof:HostId or Proof:Cluster.");
+                $"A host token without vm_name is {probe.Length} characters before any identity, over the {KvpLimits.MaxValueLength}-character KVP limit. Shorten Proof:IssuerUrl or Proof:HostId.");
         }
     }
 
@@ -42,39 +42,38 @@ public sealed class HostTokenSigner
     public string Kid => Jwk.Kid;
 
     /// <summary>
-    /// Signs a token for <paramref name="vm"/>. If it would not fit in one KVP value, <c>vm_name</c> is left out:
-    /// it is informational, and one value keeps the guest side simple (no chunked keys).
+    /// Signs a token for <paramref name="vm"/> with <paramref name="identity"/>. If it would not fit in one KVP value,
+    /// <c>vm_name</c> is left out: it is informational, and one value keeps the guest side simple (no chunked keys).
+    /// The identity is never shortened, so the result may still not <see cref="SignedHostToken.Fits"/>.
     /// </summary>
-    public SignedHostToken Sign(VirtualMachine vm, DateTimeOffset now)
+    public SignedHostToken Sign(VirtualMachine vm, VmIdentity identity, DateTimeOffset now)
     {
-        var token = Create(vm, now, includeVmName: vm.Name.Length > 0);
+        var token = Create(vm, identity, now, includeVmName: vm.Name.Length > 0);
         var omitted = false;
-        if (token.Length > KvpLimits.MaxValueLength)
+        if (token.Length > KvpLimits.MaxValueLength && vm.Name.Length > 0)
         {
-            token = Create(vm, now, includeVmName: false);
-            omitted = vm.Name.Length > 0;
+            token = Create(vm, identity, now, includeVmName: false);
+            omitted = true;
         }
 
         var jti = new JsonWebToken(token).Id;
         return new SignedHostToken(token, jti, now + HostTokenPolicy.Lifetime, omitted);
     }
 
-    private string Create(VirtualMachine vm, DateTimeOffset now, bool includeVmName)
+    private string Create(VirtualMachine vm, VmIdentity identity, DateTimeOffset now, bool includeVmName)
     {
         var claims = new Dictionary<string, object>
         {
             [JwtRegisteredClaimNames.Sub] = vm.Id,
             [JwtRegisteredClaimNames.Jti] = ProofTokenIds.NewJti(),
+            [ProofClaimNames.Tenant] = identity.Tenant,
+            [ProofClaimNames.AssignedId] = identity.AssignedId,
+            [ProofClaimNames.SecurityTags] = identity.SecurityTags.ToArray(),
         };
 
         if (includeVmName)
         {
             claims[ProofClaimNames.VmName] = vm.Name;
-        }
-
-        if (options.Cluster is not null)
-        {
-            claims[ProofClaimNames.Cluster] = options.Cluster;
         }
 
         return handler.CreateToken(new SecurityTokenDescriptor

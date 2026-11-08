@@ -12,6 +12,14 @@ public static class DiscoveryEndpoints
     /// <summary>Short, so a rotation reaches verifiers quickly.</summary>
     private const string CacheControl = "public, max-age=300";
 
+    /// <summary>Every claim an issued JWT can carry. <c>vm_name</c> is the only one that may be missing.</summary>
+    public static readonly string[] ClaimsSupported =
+    [
+        "iss", "sub", "aud", "exp", "nbf", "iat", "jti",
+        ProofClaimNames.Tenant, ProofClaimNames.AssignedId, ProofClaimNames.VmId, ProofClaimNames.SecurityTags,
+        ProofClaimNames.Host, ProofClaimNames.VmName,
+    ];
+
     public static IEndpointRouteBuilder MapDiscovery(this IEndpointRouteBuilder app)
     {
         app.MapGet(DiscoveryPath, (HttpContext http, IOptions<IssuerOptions> options) =>
@@ -26,7 +34,8 @@ public static class DiscoveryEndpoints
                     ResponseTypesSupported: ["id_token"],
                     SubjectTypesSupported: ["public"],
                     IdTokenSigningAlgValuesSupported: [ProofAlgorithms.Signing],
-                    GrantTypesSupported: [TokenExchange.GrantType]),
+                    GrantTypesSupported: [TokenExchange.GrantType],
+                    ClaimsSupported: ClaimsSupported),
                 Issuer.TokenEndpoint.Json);
         });
 
@@ -50,7 +59,8 @@ public static class DiscoveryEndpoints
         string[] ResponseTypesSupported,
         string[] SubjectTypesSupported,
         string[] IdTokenSigningAlgValuesSupported,
-        string[] GrantTypesSupported);
+        string[] GrantTypesSupported,
+        string[] ClaimsSupported);
 
     private sealed record JwksDocument(Jwk[] Keys);
 

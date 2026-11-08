@@ -37,25 +37,26 @@ public sealed class HostTokenValidatorTests : IDisposable
 
         Assert.True(result.IsValid, result.Failure.ToString());
         var identity = result.Identity!;
-        Assert.Equal("cluster:prod/" + TestHost.VmId, identity.Subject);
+        Assert.Equal("tenant:acme:assignedID:web01.prod.example.com:vmID:" + TestHost.VmId, identity.Subject);
         Assert.Equal(TestHost.VmId, identity.VmId);
+        Assert.Equal(TestHost.Identity(), identity.Identity);
         Assert.Equal(host.HostId, identity.Host);
         Assert.Equal(host.Kid, identity.Kid);
         Assert.Equal("web01", identity.VmName);
-        Assert.Equal("prod", identity.Cluster);
     }
 
     [Fact]
     public async Task AcceptsTokenWithoutOptionalClaims()
     {
-        var standalone = new TestHost(cluster: null);
-        using var unclustered = new ValidatorHarness(TestHost.Allowlist(standalone.AllowlistEntry()));
-        var token = standalone.CreateToken(c => c.Remove(ProofClaimNames.VmName));
+        var token = host.CreateToken(c =>
+        {
+            c.Remove(ProofClaimNames.VmName);
+            c[ProofClaimNames.SecurityTags] = Array.Empty<string>();
+        });
 
-        var result = await unclustered.ValidateAsync(token);
+        var result = await harness.ValidateAsync(token);
         Assert.True(result.IsValid, result.Failure.ToString());
-        Assert.Equal("host:hv-host-01/" + TestHost.VmId, result.Identity!.Subject);
-        Assert.Null(result.Identity.Cluster);
+        Assert.Empty(result.Identity!.Identity.SecurityTags);
         Assert.Null(result.Identity.VmName);
     }
 
@@ -164,9 +165,86 @@ public sealed class HostTokenValidatorTests : IDisposable
     public Task RefusesNonCanonicalSubject(string sub) =>
         AssertRefused(host.CreateToken(c => c[JwtRegisteredClaimNames.Sub] = sub), HostTokenFailure.InvalidSubject);
 
+    // Identity.
+
+    [Theory]
+    [InlineData(ProofClaimNames.Tenant)]
+    [InlineData(ProofClaimNames.AssignedId)]
+    public Task RefusesTokenWithoutIdentity(string claim) =>
+        AssertRefused(host.CreateToken(c => c.Remove(claim)), HostTokenFailure.MissingIdentity);
+
     [Fact]
-    public Task RefusesNonStringCluster() =>
-        AssertRefused(host.CreateToken(c => c[ProofClaimNames.Cluster] = 7), HostTokenFailure.InvalidClaim);
+    public Task RefusesTokenWithoutSecurityTags() =>
+        AssertRefused(host.CreateToken(c => c.Remove(ProofClaimNames.SecurityTags)), HostTokenFailure.InvalidIdentity);
+
+    [Theory]
+    [InlineData("ACME")]
+    [InlineData("acme:corp")]
+    [InlineData("-acme")]
+    [InlineData("acme corp")]
+    [InlineData("acme\n")]
+    [InlineData("")]
+    [InlineData("acmé")]
+    public Task RefusesNonCanonicalTenant(string tenant) =>
+        AssertRefused(host.CreateToken(c => c[ProofClaimNames.Tenant] = tenant), HostTokenFailure.InvalidIdentity);
+
+    [Theory]
+    [InlineData("Web01.prod.example.com")]
+    [InlineData("web01:prod")]
+    [InlineData(".web01")]
+    [InlineData("web01/prod")]
+    public Task RefusesNonCanonicalAssignedId(string assignedId) =>
+        AssertRefused(host.CreateToken(c => c[ProofClaimNames.AssignedId] = assignedId), HostTokenFailure.InvalidIdentity);
+
+    [Fact]
+    public async Task HoldsValuesToTheirLengthLimits()
+    {
+        Assert.True((await harness.ValidateAsync(host.CreateToken(c => c[ProofClaimNames.Tenant] = new string('t', 63)))).IsValid);
+        await AssertRefused(host.CreateToken(c => c[ProofClaimNames.Tenant] = new string('t', 64)), HostTokenFailure.InvalidIdentity);
+        Assert.True((await harness.ValidateAsync(host.CreateToken(c => c[ProofClaimNames.AssignedId] = new string('a', 253)))).IsValid);
+        await AssertRefused(host.CreateToken(c => c[ProofClaimNames.AssignedId] = new string('a', 254)), HostTokenFailure.InvalidIdentity);
+    }
+
+    public static TheoryData<object> BadSecurityTags() => new()
+    {
+        "puppet",
+        new[] { "puppet", "puppet" },
+        new[] { "Puppet" },
+        new[] { "ssh:ca" },
+        new[] { "" },
+        new object[] { "puppet", 7 },
+        Enumerable.Range(0, 17).Select(i => $"tag{i}").ToArray(),
+        new[] { new string('t', 64) },
+    };
+
+    [Theory]
+    [MemberData(nameof(BadSecurityTags))]
+    public Task RefusesBadSecurityTags(object tags) =>
+        AssertRefused(host.CreateToken(c => c[ProofClaimNames.SecurityTags] = tags), HostTokenFailure.InvalidIdentity);
+
+    [Fact]
+    public async Task AcceptsSixteenSecurityTags()
+    {
+        var tags = Enumerable.Range(0, 16).Select(i => $"tag{i}").ToArray();
+        var result = await harness.ValidateAsync(host.CreateToken(c => c[ProofClaimNames.SecurityTags] = tags));
+        Assert.True(result.IsValid, result.Failure.ToString());
+        Assert.Equal(tags, result.Identity!.Identity.SecurityTags);
+    }
+
+    [Theory]
+    [InlineData(ProofClaimNames.Tenant)]
+    [InlineData(ProofClaimNames.AssignedId)]
+    public Task RefusesNonStringIdentity(string claim) =>
+        AssertRefused(host.CreateToken(c => c[claim] = 7), HostTokenFailure.InvalidIdentity);
+
+    [Fact]
+    public async Task IgnoresAClusterFromAnOlderHost()
+    {
+        var result = await harness.ValidateAsync(host.CreateToken(c => c["cluster"] = "prod"));
+
+        Assert.True(result.IsValid, result.Failure.ToString());
+        Assert.Equal(TestHost.Subject, result.Identity!.Subject);
+    }
 
     // Header and algorithm.
 
@@ -306,68 +384,29 @@ public sealed class HostTokenValidatorTests : IDisposable
         Assert.Equal(HostTokenFailure.AllowlistNotLoaded, result.Failure);
     }
 
-    // Cluster scoping. The allowlist entry alone scopes the subject; a host token must agree with it.
+    // Subjects. The host that signed is not part of the subject: every allowlisted host is one trust environment.
 
-    [Theory]
-    [InlineData("test")]
-    [InlineData(null)]
-    public async Task RefusesAClusterOtherThanTheAllowlistEntrys(string? cluster)
+    [Fact]
+    public async Task GivesAVmTheSameSubjectFromEveryHost()
     {
-        var token = host.CreateToken(c =>
-        {
-            if (cluster is null)
-            {
-                c.Remove(ProofClaimNames.Cluster);
-            }
-            else
-            {
-                c[ProofClaimNames.Cluster] = cluster;
-            }
-        });
+        // Live migration moves a VM between hosts, and its notes go with it; its identity must not change.
+        var first = new TestHost("hv-host-01");
+        var second = new TestHost("hv-host-02");
+        using var both = new ValidatorHarness(TestHost.Allowlist(first.AllowlistEntry(), second.AllowlistEntry()));
 
-        await AssertRefused(token, HostTokenFailure.ClusterMismatch);
+        Assert.Equal(TestHost.Subject, (await both.ValidateAsync(first.CreateToken())).Identity!.Subject);
+        Assert.Equal(TestHost.Subject, (await both.ValidateAsync(second.CreateToken())).Identity!.Subject);
     }
 
     [Fact]
-    public async Task RefusesAClusterFromAHostInNoCluster()
+    public async Task GivesVmsWithOneTenantAndAssignedIdDifferentSubjects()
     {
-        var standalone = new TestHost(cluster: null);
-        using var unclustered = new ValidatorHarness(TestHost.Allowlist(standalone.AllowlistEntry()));
-        var token = standalone.CreateToken(c => c[ProofClaimNames.Cluster] = "prod");
-        Assert.Equal(HostTokenFailure.ClusterMismatch, (await unclustered.ValidateAsync(token)).Failure);
-    }
+        // Proof does not enforce unique (tenant, assigned ID) pairs; the VM ID keeps the subjects apart.
+        const string other = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-    [Fact]
-    public async Task GivesTheSameVmIdOnDifferentScopesDifferentSubjects()
-    {
-        // An imported or restored VM keeps its ID, so two scopes can each run a VM with this one.
-        var prod = new TestHost("hv-host-01", "prod");
-        var lab = new TestHost("hv-host-02", "lab");
-        var standalone = new TestHost("hv-host-03", cluster: null);
-        using var all = new ValidatorHarness(TestHost.Allowlist(prod.AllowlistEntry(), lab.AllowlistEntry(), standalone.AllowlistEntry()));
+        var subject = (await harness.ValidateAsync(host.CreateToken(c => c[JwtRegisteredClaimNames.Sub] = other))).Identity!.Subject;
 
-        var subjects = new List<string>();
-        foreach (var h in new[] { prod, lab, standalone })
-        {
-            var result = await all.ValidateAsync(h.CreateToken());
-            Assert.True(result.IsValid, result.Failure.ToString());
-            Assert.Equal(TestHost.VmId, result.Identity!.VmId);
-            subjects.Add(result.Identity.Subject);
-        }
-
-        Assert.Equal(["cluster:prod/" + TestHost.VmId, "cluster:lab/" + TestHost.VmId, "host:hv-host-03/" + TestHost.VmId], subjects);
-    }
-
-    [Fact]
-    public async Task GivesEveryHostInAClusterTheSameSubject()
-    {
-        // Live migration moves a VM between hosts of one cluster; its identity must not change.
-        var first = new TestHost("hv-host-01", "prod");
-        var second = new TestHost("hv-host-02", "prod");
-        using var cluster = new ValidatorHarness(TestHost.Allowlist(first.AllowlistEntry(), second.AllowlistEntry()));
-
-        Assert.Equal(
-            (await cluster.ValidateAsync(first.CreateToken())).Identity!.Subject,
-            (await cluster.ValidateAsync(second.CreateToken())).Identity!.Subject);
+        Assert.Equal($"tenant:{TestHost.Tenant}:assignedID:{TestHost.AssignedId}:vmID:{other}", subject);
+        Assert.NotEqual(TestHost.Subject, subject);
     }
 }

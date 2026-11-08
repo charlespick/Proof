@@ -70,6 +70,89 @@ public class VmMetadataBlockTests
         Assert.Contains(name, ex.Message);
     }
 
+    // Identity.
+
+    private const string Identity = "identity:\n  tenant: acme\n  assigned-id: web01.prod.example.com\n  security-tags: [puppet, ssh-ca]\n";
+
+    [Fact]
+    public void ReadsTheIdentity()
+    {
+        var identity = Block(Identity + "meta-data:\n  hostname: web01\n").Identity!;
+
+        Assert.Equal("acme", identity.Tenant);
+        Assert.Equal("web01.prod.example.com", identity.AssignedId);
+        Assert.Equal(["puppet", "ssh-ca"], identity.SecurityTags);
+    }
+
+    [Fact]
+    public void BlockWithoutIdentityHasNone() => Assert.Null(Block("meta-data:\n  hostname: web01\n").Identity);
+
+    [Theory]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags: []\n")]
+    public void SecurityTagsAreOptional(string yaml) => Assert.Empty(Block(yaml).Identity!.SecurityTags);
+
+    [Fact]
+    public void TenantAndAssignedIdAreLowercasedButTagsAreNot()
+    {
+        var identity = Block("identity:\n  tenant: ACME\n  assigned-id: Web01.Prod.Example.COM\n").Identity!;
+        Assert.Equal(("acme", "web01.prod.example.com"), (identity.Tenant, identity.AssignedId));
+
+        Assert.Throws<VmMetadataException>(() => Block("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags: [Puppet]\n"));
+    }
+
+    [Theory]
+    [InlineData("identity: acme\n", "must be a mapping")]
+    [InlineData("identity:\n  assigned-id: web01\n", "tenant is required")]
+    [InlineData("identity:\n  tenant: acme\n", "assigned-id is required")]
+    [InlineData("identity:\n  tenant: ''\n  assigned-id: web01\n", "tenant is required")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tag: [puppet]\n", "only keys under identity")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags: puppet\n", "must be a list")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags:\n", "must be a list")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags: [[a]]\n", "must be a list")]
+    [InlineData("identity:\n  tenant: [acme]\n  assigned-id: web01\n", "must be a string")]
+    [InlineData("identity:\n  tenant: acme:corp\n  assigned-id: web01\n", "tenant must be")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web 01\n", "assigned-id must be")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags: [a, a]\n", "repeats")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags: ['ssh:ca']\n", "security-tags[0] must be")]
+    [InlineData("identity:\n  tenant: !sensitive acme\n  assigned-id: web01\n", "must not use !sensitive")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: web01\n  security-tags: [!sensitive a]\n", "must not use !sensitive")]
+    [InlineData("identity:\n  tenant: acme\n  assigned-id: !cleared \"2026-01-01T00:00:00Z\"\n", "must not use !sensitive")]
+    public void BadIdentitiesAreRefusedWithoutQuotingValues(string yaml, string reason)
+    {
+        var ex = Assert.Throws<VmMetadataException>(() => Block(yaml));
+        Assert.Contains(reason, ex.Message);
+        Assert.DoesNotContain("acme", ex.Message);
+        Assert.DoesNotContain("web01", ex.Message);
+    }
+
+    [Fact]
+    public void SecurityTagsAreLimitedInNumber()
+    {
+        var tags = string.Join(", ", Enumerable.Range(0, 17).Select(i => $"t{i}"));
+        Assert.Contains("at most 16", Assert.Throws<VmMetadataException>(() => Block($"identity:\n  tenant: a\n  assigned-id: b\n  security-tags: [{tags}]\n")).Message);
+    }
+
+    [Fact]
+    public void IdentityIsNeverServed()
+    {
+        var response = Block(Identity + "meta-data:\n  hostname: web01\n").ToResponse(InstanceId, "web01");
+
+        Assert.Equal(new[] { "uuid", "hostname" }, VmMetadataBlock.ServedNames(response));
+        Assert.DoesNotContain("acme", response.MetaData!.Value.GetRawText());
+    }
+
+    [Fact]
+    public void FinishingLeavesTheIdentityInPlace()
+    {
+        var notes = Notes(Identity + "user-data: !sensitive secret\n");
+
+        var finished = VmMetadataBlock.Find(notes)!.Finish(ProvisioningStatus.Complete, InstanceId, Now);
+
+        Assert.Contains(Identity, finished.ReplaceLineEndings("\n"));
+        Assert.Equal(VmMetadataBlock.Find(notes)!.Identity, VmMetadataBlock.Find(finished)!.Identity);
+    }
+
     [Fact]
     public void ServedNamesListTheInstanceIdThenMetaDataThenDocuments()
     {

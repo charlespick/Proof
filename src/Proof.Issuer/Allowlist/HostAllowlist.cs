@@ -13,7 +13,6 @@ public enum HostKeyStatus
 public sealed record AllowlistKey(
     string Kid,
     string Host,
-    string? Cluster,
     HostKeyStatus Status,
     DateTimeOffset? NotAfter,
     ECDsaSecurityKey Key)

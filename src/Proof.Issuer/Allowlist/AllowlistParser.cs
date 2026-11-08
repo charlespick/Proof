@@ -69,7 +69,7 @@ public static class AllowlistParser
                 throw new AllowlistException($"{where}.host is required.");
             }
 
-            // Names go into issued subjects, so they keep to the refresher's rule and never hold a '/' or ':'.
+            // Host IDs go into issued JWTs, so they keep to the refresher's rule.
             if (!ProofNames.IsValid(entry.Host))
             {
                 throw new AllowlistException($"{where}.host '{entry.Host}' must be 1 to 253 letters, digits, '.', '-' or '_', starting with a letter or digit.");
@@ -80,16 +80,6 @@ public static class AllowlistParser
                 throw new AllowlistException($"Host '{entry.Host}' is listed more than once.");
             }
 
-            if (entry.Cluster is not null && string.IsNullOrWhiteSpace(entry.Cluster))
-            {
-                throw new AllowlistException($"{where}.cluster is empty; omit it instead.");
-            }
-
-            if (entry.Cluster is not null && !ProofNames.IsValid(entry.Cluster))
-            {
-                throw new AllowlistException($"{where}.cluster '{entry.Cluster}' must be 1 to 253 letters, digits, '.', '-' or '_', starting with a letter or digit.");
-            }
-
             if (entry.Keys is null || entry.Keys.Count == 0)
             {
                 throw new AllowlistException($"Host '{entry.Host}' has no keys; remove the host instead.");
@@ -97,7 +87,7 @@ public static class AllowlistParser
 
             for (var k = 0; k < entry.Keys.Count; k++)
             {
-                var key = ParseKey(entry.Keys[k], entry.Host, entry.Cluster, $"{where}.keys[{k}]");
+                var key = ParseKey(entry.Keys[k], entry.Host, $"{where}.keys[{k}]");
                 if (!keys.TryAdd(key.Kid, key))
                 {
                     throw new AllowlistException($"Key '{key.Kid}' is listed more than once.");
@@ -108,7 +98,7 @@ public static class AllowlistParser
         return new HostAllowlist(keys, Convert.ToHexStringLower(SHA256.HashData(content)));
     }
 
-    private static AllowlistKey ParseKey(KeyEntry entry, string host, string? cluster, string where)
+    private static AllowlistKey ParseKey(KeyEntry entry, string host, string where)
     {
         if (string.IsNullOrWhiteSpace(entry.Kid))
         {
@@ -145,7 +135,7 @@ public static class AllowlistParser
             throw new AllowlistException($"{where}.kid does not match the JWK thumbprint of its key ({computedKid}).");
         }
 
-        return new AllowlistKey(entry.Kid, host, cluster, status, notAfter, CreateSecurityKey(jwk, where));
+        return new AllowlistKey(entry.Kid, host, status, notAfter, CreateSecurityKey(jwk, where));
     }
 
     private static JsonWebKey ParseJwk(Dictionary<string, string>? members, string where)
@@ -214,7 +204,6 @@ public static class AllowlistParser
     private sealed class HostEntry
     {
         public string? Host { get; set; }
-        public string? Cluster { get; set; }
         public List<KeyEntry>? Keys { get; set; }
     }
 

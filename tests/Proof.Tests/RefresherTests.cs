@@ -1,21 +1,24 @@
+using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
+using Microsoft.IdentityModel.Tokens;
 using Proof.Issuer;
 using Proof.Refresher;
 using Proof.Shared;
 using Proof.Tests.Support;
-using System.Diagnostics.Metrics;
 
 namespace Proof.Tests;
 
 /// <summary>The refresher's signer and refresh loop, checked against the issuer's own validator.</summary>
 public sealed class RefresherTests : IDisposable
 {
-    private static readonly VirtualMachine Web01 = new(TestHost.VmId, "web01");
-    private static readonly VirtualMachine Db01 = new("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "db01");
+    private static readonly VirtualMachine Web01 = new(TestHost.VmId, "web01", Notes.WithIdentity());
+    private static readonly VirtualMachine Db01 = new("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "db01", Notes.WithIdentity(assignedId: "db01.prod.example.com", securityTags: "[]"));
+    private static readonly VirtualMachine Bare01 = new("bbbbbbbb-cccc-dddd-eeee-ffffffffffff", "bare01", Notes.WithoutIdentity);
 
     private readonly ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     private readonly ServiceProvider services = new ServiceCollection().AddMetrics().BuildServiceProvider();
@@ -27,9 +30,9 @@ public sealed class RefresherTests : IDisposable
 
     public RefresherTests()
     {
-        signer = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01", Cluster = "prod" });
+        signer = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01" });
         refresher = new TokenRefresher(hyperV, signer, time, services.GetRequiredService<IMeterFactory>(), NullLogger<TokenRefresher>.Instance);
-        issuer = new ValidatorHarness(AllowlistFor(signer, "hv-host-01", "prod"));
+        issuer = new ValidatorHarness(AllowlistFor(signer, "hv-host-01"));
     }
 
     public void Dispose()
@@ -41,30 +44,32 @@ public sealed class RefresherTests : IDisposable
 
     private HostTokenSigner CreateSigner(RefresherOptions options) => new(key, Options.Create(options));
 
-    private static string AllowlistFor(HostTokenSigner signer, string host, string? cluster) =>
+    private static string AllowlistFor(HostTokenSigner signer, string host) =>
         TestHost.Allowlist(
             $"  - host: {host}\n"
-            + (cluster is null ? "" : $"    cluster: {cluster}\n")
             + "    keys:\n"
             + $"      - kid: {signer.Kid}\n"
             + "        status: active\n"
             + $"        jwk: {{ kty: EC, crv: P-256, x: {signer.Jwk.X}, y: {signer.Jwk.Y} }}\n");
+
+    private static JsonElement Payload(string token) =>
+        JsonDocument.Parse(Base64UrlEncoder.Decode(new JsonWebToken(token).EncodedPayload)).RootElement;
 
     // Signing.
 
     [Fact]
     public async Task SignedTokenPassesIssuerValidation()
     {
-        var signed = signer.Sign(Web01, DateTimeOffset.UtcNow);
+        var signed = signer.Sign(Web01, TestHost.Identity(), DateTimeOffset.UtcNow);
 
         var result = await issuer.ValidateAsync(signed.Token);
 
         Assert.True(result.IsValid, result.Failure.ToString());
         Assert.Equal(TestHost.VmId, result.Identity!.VmId);
-        Assert.Equal("cluster:prod/" + TestHost.VmId, result.Identity.Subject);
+        Assert.Equal(TestHost.Subject, result.Identity.Subject);
+        Assert.Equal(TestHost.Identity(), result.Identity.Identity);
         Assert.Equal("hv-host-01", result.Identity.Host);
         Assert.Equal("web01", result.Identity.VmName);
-        Assert.Equal("prod", result.Identity.Cluster);
         Assert.Equal(signed.Jti, result.Identity.Jti);
         Assert.False(signed.VmNameOmitted);
     }
@@ -73,7 +78,8 @@ public sealed class RefresherTests : IDisposable
     public void TokenHasDesignHeaderAndClaims()
     {
         var now = DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-        var jwt = new JsonWebToken(signer.Sign(Web01, now).Token);
+        var token = signer.Sign(Web01, TestHost.Identity(), now).Token;
+        var jwt = new JsonWebToken(token);
 
         Assert.Equal(ProofAlgorithms.Signing, jwt.Alg);
         Assert.Equal(ProofTokenTypes.HostToken, jwt.Typ);
@@ -81,27 +87,62 @@ public sealed class RefresherTests : IDisposable
         Assert.Equal(ProofKeys.ComputeKid(signer.Jwk), jwt.Kid);
         Assert.Equal("hv-host-01", jwt.Issuer);
         Assert.Equal([TestHost.IssuerUrl], jwt.Audiences);
+        Assert.Equal(TestHost.VmId, jwt.Subject);
         Assert.Equal(now, new DateTimeOffset(jwt.IssuedAt));
         Assert.Equal(now, new DateTimeOffset(jwt.ValidFrom));
         Assert.Equal(now + HostTokenPolicy.Lifetime, new DateTimeOffset(jwt.ValidTo));
         Assert.Matches("^[0-9a-f]{32}$", jwt.Id);
+
+        var payload = Payload(token);
+        Assert.Equal("acme", payload.GetProperty("tenant").GetString());
+        Assert.Equal("web01.prod.example.com", payload.GetProperty("assigned_id").GetString());
+        Assert.Equal(["puppet", "ssh-ca"], payload.GetProperty("security_tags").EnumerateArray().Select(e => e.GetString()));
+        Assert.False(payload.TryGetProperty("cluster", out _));
+    }
+
+    [Fact]
+    public void NoSecurityTagsAreSignedAsAnEmptyArray()
+    {
+        var payload = Payload(signer.Sign(Web01, TestHost.Identity(securityTags: []), DateTimeOffset.UtcNow).Token);
+
+        Assert.Equal(JsonValueKind.Array, payload.GetProperty("security_tags").ValueKind);
+        Assert.Equal(0, payload.GetProperty("security_tags").GetArrayLength());
     }
 
     [Fact]
     public void JtiIsFreshEachTime()
     {
         var now = DateTimeOffset.UtcNow;
-        Assert.NotEqual(signer.Sign(Web01, now).Jti, signer.Sign(Web01, now).Jti);
+        Assert.NotEqual(signer.Sign(Web01, TestHost.Identity(), now).Jti, signer.Sign(Web01, TestHost.Identity(), now).Jti);
     }
 
     [Fact]
     public void TypicalTokenFitsWellInsideKvpLimit()
     {
-        // Expected to be 500 to 550 characters. Measured here with a realistic issuer URL and names.
-        var s = CreateSigner(new RefresherOptions { IssuerUrl = "https://id.corp.example", HostId = "hv-host-01", Cluster = "prod" });
-        var token = s.Sign(Web01, DateTimeOffset.UtcNow).Token;
+        // Measured with a realistic issuer URL and names: about 660 characters, leaving room for longer identities.
+        var s = CreateSigner(new RefresherOptions { IssuerUrl = "https://id.corp.example", HostId = "hv-host-01" });
+        var token = s.Sign(Web01, TestHost.Identity(), DateTimeOffset.UtcNow).Token;
 
-        Assert.InRange(token.Length, 450, 600);
+        Assert.InRange(token.Length, 600, 720);
+    }
+
+    [Theory]
+    // What the documentation promises: with an issuer URL and host ID of 32 characters each, an identity fits if its
+    // tenant, assigned ID and tags, counting 3 more characters per tag, add up to 340 characters. Measured, the limit
+    // is 343. The largest tenant and assigned ID always fit together.
+    [InlineData(63, 253, new[] { 21 }, true)]
+    [InlineData(32, 64, new[] { 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16 }, true)]
+    [InlineData(4, 22, new[] { 6, 6 }, true)]
+    [InlineData(63, 253, new[] { 28 }, false)]
+    [InlineData(32, 64, new[] { 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16 }, false)]
+    public void DocumentedIdentityBudgetFits(int tenant, int assignedId, int[] tags, bool fits)
+    {
+        var s = CreateSigner(new RefresherOptions { IssuerUrl = "https://" + new string('i', 24), HostId = new string('h', 32) });
+        var identity = TestHost.Identity(
+            new string('t', tenant), new string('a', assignedId), tags.Select((length, i) => $"{i:x}{new string('s', length - 1)}").ToArray());
+        Assert.Equal(fits, tenant + assignedId + tags.Sum(t => t + 3) <= 340);
+
+        Assert.Equal(fits, s.Sign(Web01, identity, DateTimeOffset.UtcNow).Fits);
     }
 
     [Fact]
@@ -110,10 +151,10 @@ public sealed class RefresherTests : IDisposable
         // 100 characters is the Hyper-V maximum; non-ASCII names grow when encoded.
         var vm = Web01 with { Name = new string('é', 100) + new string('漢', 100) };
 
-        var signed = signer.Sign(vm, DateTimeOffset.UtcNow);
+        var signed = signer.Sign(vm, TestHost.Identity(), DateTimeOffset.UtcNow);
 
         Assert.True(signed.VmNameOmitted);
-        Assert.InRange(signed.Token.Length, 1, KvpLimits.MaxValueLength);
+        Assert.True(signed.Fits);
         Assert.False(new JsonWebToken(signed.Token).TryGetClaim(ProofClaimNames.VmName, out _));
         Assert.True((await issuer.ValidateAsync(signed.Token)).IsValid);
     }
@@ -121,10 +162,25 @@ public sealed class RefresherTests : IDisposable
     [Fact]
     public void MaximumLengthAsciiVmNameStillFits()
     {
-        var signed = signer.Sign(Web01 with { Name = new string('w', 100) }, DateTimeOffset.UtcNow);
+        var signed = signer.Sign(Web01 with { Name = new string('w', 100) }, TestHost.Identity(), DateTimeOffset.UtcNow);
 
         Assert.False(signed.VmNameOmitted);
-        Assert.InRange(signed.Token.Length, 1, KvpLimits.MaxValueLength);
+        Assert.True(signed.Fits);
+    }
+
+    [Fact]
+    public void LargestIdentityDoesNotFitAndIsNotShortened()
+    {
+        var identity = TestHost.Identity(
+            new string('t', VmIdentity.MaxTenantLength),
+            new string('a', VmIdentity.MaxAssignedIdLength),
+            Enumerable.Range(0, VmIdentity.MaxSecurityTags).Select(i => $"{i:x}{new string('s', VmIdentity.MaxSecurityTagLength - 1)}").ToArray());
+
+        var signed = signer.Sign(Web01, identity, DateTimeOffset.UtcNow);
+
+        Assert.False(signed.Fits);
+        Assert.True(signed.VmNameOmitted);
+        Assert.Equal(VmIdentity.MaxSecurityTags, Payload(signed.Token).GetProperty("security_tags").GetArrayLength());
     }
 
     [Fact]
@@ -139,55 +195,266 @@ public sealed class RefresherTests : IDisposable
     [Fact]
     public async Task IssuerRefusesTokenWhenHostIdDoesNotMatchAllowlist()
     {
-        var other = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-02", Cluster = "prod" });
+        var other = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-02" });
 
-        var result = await issuer.ValidateAsync(other.Sign(Web01, DateTimeOffset.UtcNow).Token);
+        var result = await issuer.ValidateAsync(other.Sign(Web01, TestHost.Identity(), DateTimeOffset.UtcNow).Token);
 
         Assert.Equal(HostTokenFailure.ValidationFailed, result.Failure);
-    }
-
-    [Fact]
-    public async Task HostConfiguredForAnotherClusterIsRefused()
-    {
-        // The refresher's Proof:Cluster must match its allowlist entry, which alone scopes the subject.
-        var misconfigured = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01", Cluster = "lab" });
-        using var harness = new ValidatorHarness(AllowlistFor(misconfigured, "hv-host-01", "prod"));
-
-        Assert.Equal(HostTokenFailure.ClusterMismatch, (await harness.ValidateAsync(misconfigured.Sign(Web01, DateTimeOffset.UtcNow).Token)).Failure);
-    }
-
-    [Fact]
-    public async Task StandaloneHostOmitsCluster()
-    {
-        var standalone = CreateSigner(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01" });
-        using var harness = new ValidatorHarness(AllowlistFor(standalone, "hv-host-01", cluster: null));
-
-        var token = standalone.Sign(Web01, DateTimeOffset.UtcNow).Token;
-
-        Assert.False(new JsonWebToken(token).TryGetClaim(ProofClaimNames.Cluster, out _));
-        var result = await harness.ValidateAsync(token);
-        Assert.True(result.IsValid, result.Failure.ToString());
-        Assert.Equal("host:hv-host-01/" + TestHost.VmId, result.Identity!.Subject);
     }
 
     // Refresh loop.
 
     [Fact]
-    public async Task FirstPassWritesEveryRunningVm()
+    public async Task FirstPassWritesEveryVmWithAnIdentity()
     {
         hyperV.Running.AddRange([Web01, Db01]);
 
         var pass = await refresher.RefreshAsync(CancellationToken.None);
 
         Assert.Equal((2, 2, 0), (pass.Running, pass.Written, pass.Failed));
-        foreach (var vm in new[] { Web01, Db01 })
+        foreach (var (vm, subject) in new[] { (Web01, TestHost.Subject), (Db01, $"tenant:acme:assignedID:db01.prod.example.com:vmID:{Db01.Id}") })
         {
-            var token = hyperV.Kvp[vm.Id][KvpKeys.Token];
-            var result = await issuer.ValidateAsync(token);
+            var result = await issuer.ValidateAsync(hyperV.Token(vm)!);
             Assert.True(result.IsValid, result.Failure.ToString());
-            Assert.Equal(vm.Id, result.Identity!.VmId);
+            Assert.Equal(subject, result.Identity!.Subject);
             Assert.Equal(vm.Name, result.Identity.VmName);
         }
+    }
+
+    [Fact]
+    public async Task TenantAndAssignedIdAreLowercased()
+    {
+        hyperV.Running.Add(Web01 with { Notes = Notes.WithIdentity("ACME", "Web01.Prod.Example.COM") });
+
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        Assert.Equal(TestHost.Subject, (await issuer.ValidateAsync(hyperV.Token(Web01)!)).Identity!.Subject);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("Just notes, no block.")]
+    [InlineData(Notes.WithoutIdentity)]
+    public async Task VmWithoutIdentityGetsNoTokenAndLosesAnOldOne(string? notes)
+    {
+        // A token from before, or from another host before the VM migrated here.
+        var vm = Bare01 with { Notes = notes };
+        hyperV.Kvp[vm.Id] = new() { [KvpKeys.Token] = "old" };
+        hyperV.Running.Add(vm);
+
+        var pass = await refresher.RefreshAsync(CancellationToken.None);
+
+        Assert.Equal(VmTokenOutcome.NotEnrolled, Assert.Single(pass.Results).Outcome);
+        Assert.False(hyperV.HasToken(vm));
+        Assert.Equal(0, hyperV.Writes);
+    }
+
+    [Fact]
+    public async Task TokenIsRemovedOnceNotOnEveryPass()
+    {
+        hyperV.Running.Add(Bare01);
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        time.Advance(HostTokenPolicy.RefreshInterval);
+        var pass = await refresher.RefreshAsync(CancellationToken.None);
+
+        Assert.Empty(pass.Results);
+        Assert.Equal(1, hyperV.Removals);
+        Assert.Equal(VmTokenOutcome.NotEnrolled, Assert.Single((await refresher.RefreshAsync(CancellationToken.None, force: true)).Results).Outcome);
+    }
+
+    [Theory]
+    [InlineData("Bad:Tenant", TestHost.AssignedId, "[]", "tenant must be")]
+    [InlineData(TestHost.Tenant, "web 01", "[]", "assigned-id must be")]
+    [InlineData(TestHost.Tenant, TestHost.AssignedId, "[Puppet]", "security-tags[0] must be")]
+    [InlineData(TestHost.Tenant, TestHost.AssignedId, "[a, a]", "repeats")]
+    [InlineData(TestHost.Tenant, TestHost.AssignedId, "puppet", "must be a list")]
+    public async Task InvalidIdentityIsRefusedWithAReasonThatQuotesNoValue(string tenant, string assignedId, string tags, string reason)
+    {
+        var vm = Web01 with { Notes = Notes.WithIdentity(tenant, assignedId, tags) };
+        hyperV.Kvp[vm.Id] = new() { [KvpKeys.Token] = "old" };
+        hyperV.Running.Add(vm);
+
+        var pass = await refresher.RefreshAsync(CancellationToken.None);
+
+        var result = Assert.Single(pass.Results);
+        Assert.Equal(VmTokenOutcome.Refused, result.Outcome);
+        Assert.Contains(reason, result.Detail);
+        Assert.DoesNotContain("Bad", result.Detail);
+        Assert.DoesNotContain("web 01", result.Detail);
+        Assert.Equal(1, pass.Refused);
+        Assert.False(hyperV.HasToken(vm));
+    }
+
+    [Fact]
+    public async Task ABlockThatCannotBeUsedForAnyReasonGivesNoToken()
+    {
+        // The identity is fine, but the block holding it is not, so none of it is trusted.
+        var vm = Web01 with { Notes = Notes.WithIdentity().Replace("  hostname: web01", "  hostname: !sensitivee web01") };
+        hyperV.Running.Add(vm);
+
+        var result = Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results);
+
+        Assert.Equal(VmTokenOutcome.Refused, result.Outcome);
+        Assert.Contains("Unknown tag", result.Detail);
+    }
+
+    [Fact]
+    public async Task TokenThatDoesNotFitIsNotWrittenAndAnOldOneIsRemoved()
+    {
+        hyperV.Running.Add(Web01);
+        await refresher.RefreshAsync(CancellationToken.None);
+        var tags = string.Join(", ", Enumerable.Range(0, 16).Select(i => $"{i:x}{new string('s', 62)}"));
+        hyperV.SetNotes(Web01, Notes.WithIdentity(securityTags: $"[{tags}]"));
+
+        var result = Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results);
+
+        Assert.Equal(VmTokenOutcome.Refused, result.Outcome);
+        Assert.Contains("over the 1023-character KVP limit", result.Detail);
+        Assert.False(hyperV.HasToken(Web01));
+        Assert.Equal(1, hyperV.Writes);
+    }
+
+    [Fact]
+    public async Task IdentityThatDoesNotFitIsReportedOnceUntilItChanges()
+    {
+        var tags = string.Join(", ", Enumerable.Range(0, 16).Select(i => $"{i:x}{new string('s', 62)}"));
+        var vm = Web01 with { Notes = Notes.WithIdentity(securityTags: $"[{tags}]") };
+        hyperV.Running.Add(vm);
+        Assert.Equal(VmTokenOutcome.Refused, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+
+        time.Advance(HostTokenPolicy.RefreshInterval);
+
+        // Not signed and reported again on every pass, and a notes edit that keeps it wakes no pass.
+        Assert.Empty((await refresher.RefreshAsync(CancellationToken.None)).Results);
+        Assert.False(refresher.IdentityChanged(vm with { Notes = "Edited.\r\n" + vm.Notes }));
+
+        var fixedVm = hyperV.SetNotes(vm, Notes.WithIdentity());
+        Assert.True(refresher.IdentityChanged(fixedVm));
+        Assert.Equal(VmTokenOutcome.Written, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+    }
+
+    [Fact]
+    public async Task NotesChangeDuringAPassWakesAnother()
+    {
+        // A pass reads B, then the notes go back to A before it writes. Compared with the token last written (A), the
+        // change looks like nothing, but this pass is about to write B.
+        hyperV.Running.Add(Web01);
+        await refresher.RefreshAsync(CancellationToken.None);
+        var b = hyperV.SetNotes(Web01, Notes.WithIdentity(securityTags: "[puppet, admin]"));
+        bool? sawChange = null;
+        hyperV.AfterNextListing = () => sawChange = refresher.IdentityChanged(hyperV.SetNotes(b, Web01.Notes));
+
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        Assert.True(sawChange);
+        Assert.Equal(["puppet", "admin"], (await issuer.ValidateAsync(hyperV.Token(Web01)!)).Identity!.Identity.SecurityTags);
+        await refresher.RefreshAsync(CancellationToken.None);
+        Assert.Equal(TestHost.SecurityTags, (await issuer.ValidateAsync(hyperV.Token(Web01)!)).Identity!.Identity.SecurityTags);
+    }
+
+    [Fact]
+    public async Task NotesChangeForAVmFirstSeenDuringAPassWakesAnother()
+    {
+        // The start event's pass has read the new VM's notes, and the VM is not yet in this process's state.
+        bool? sawChange = null;
+        hyperV.Running.Add(Bare01);
+        hyperV.AfterNextListing = () => sawChange = refresher.IdentityChanged(hyperV.SetNotes(Bare01, Notes.WithIdentity(assignedId: "bare01")));
+
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        Assert.True(sawChange);
+        Assert.Equal(VmTokenOutcome.Written, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+    }
+
+    [Fact]
+    public async Task SigningFailureFailsOnlyThatVm()
+    {
+        // A key that can no longer sign, as when its key storage provider fails.
+        var broken = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var brokenSigner = new HostTokenSigner(broken, Options.Create(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01" }));
+        broken.Dispose();
+        var brokenRefresher = new TokenRefresher(hyperV, brokenSigner, time, services.GetRequiredService<IMeterFactory>(), NullLogger<TokenRefresher>.Instance);
+        hyperV.Kvp[Bare01.Id] = new() { [KvpKeys.Token] = "old" };
+        hyperV.Running.AddRange([Web01, Bare01]);
+
+        var pass = await brokenRefresher.RefreshAsync(CancellationToken.None);
+
+        Assert.Equal(VmTokenOutcome.Failed, pass.Results.Single(r => r.Vm == Web01).Outcome);
+        Assert.Contains(nameof(ObjectDisposedException), pass.Results.Single(r => r.Vm == Web01).Detail);
+        Assert.Equal(VmTokenOutcome.NotEnrolled, pass.Results.Single(r => r.Vm == Bare01).Outcome);
+        Assert.False(hyperV.HasToken(Bare01));
+    }
+
+    [Fact]
+    public async Task IdentityChangeIsWrittenAtOnceThoughTheTokenIsNotDue()
+    {
+        hyperV.Running.Add(Web01);
+        await refresher.RefreshAsync(CancellationToken.None);
+        var changed = hyperV.SetNotes(Web01, Notes.WithIdentity(securityTags: "[puppet]"));
+        time.Advance(TimeSpan.FromSeconds(5));
+
+        Assert.True(refresher.IdentityChanged(changed));
+        var result = Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results);
+
+        Assert.Equal(VmTokenOutcome.Written, result.Outcome);
+        Assert.Equal(["puppet"], (await issuer.ValidateAsync(hyperV.Token(Web01)!)).Identity!.Identity.SecurityTags);
+        Assert.False(refresher.IdentityChanged(changed));
+    }
+
+    [Fact]
+    public async Task IdentityRemovedWhileRunningTakesTheTokenAway()
+    {
+        hyperV.Running.Add(Web01);
+        await refresher.RefreshAsync(CancellationToken.None);
+        var changed = hyperV.SetNotes(Web01, Notes.WithoutIdentity);
+
+        Assert.True(refresher.IdentityChanged(changed));
+        Assert.Equal(VmTokenOutcome.NotEnrolled, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+        Assert.False(hyperV.HasToken(Web01));
+    }
+
+    [Fact]
+    public async Task IdentityAddedWhileRunningIsWrittenAtOnce()
+    {
+        hyperV.Running.Add(Bare01);
+        await refresher.RefreshAsync(CancellationToken.None);
+        var changed = hyperV.SetNotes(Bare01, Notes.WithIdentity(assignedId: "bare01"));
+
+        Assert.True(refresher.IdentityChanged(changed));
+        Assert.Equal(VmTokenOutcome.Written, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+    }
+
+    [Fact]
+    public async Task NotesChangesThatKeepTheIdentityChangeNothing()
+    {
+        hyperV.Running.Add(Web01);
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        // What the metadata service does when provisioning finishes, and an operator editing their own notes.
+        var changed = hyperV.SetNotes(Web01, "Moved to the platform team.\r\n" + Notes.WithIdentity()[(Notes.WithIdentity().IndexOf('#'))..]
+            .Replace("#proof-metadata-end", "provisioning: { status: complete, at: \"2026-01-01T00:00:00Z\", instance-id: x }\r\n#proof-metadata-end"));
+
+        Assert.False(refresher.IdentityChanged(changed));
+        Assert.Empty((await refresher.RefreshAsync(CancellationToken.None)).Results);
+    }
+
+    [Fact]
+    public void IdentityChangedIsFalseForAVmNoPassHasSeen() =>
+        Assert.False(refresher.IdentityChanged(Web01));
+
+    [Fact]
+    public async Task IdentityChangedSeesABrokenOrRepairedBlock()
+    {
+        hyperV.Running.Add(Web01);
+        await refresher.RefreshAsync(CancellationToken.None);
+        var broken = hyperV.SetNotes(Web01, Notes.WithIdentity(tenant: "a:b"));
+
+        Assert.True(refresher.IdentityChanged(broken));
+        await refresher.RefreshAsync(CancellationToken.None);
+        Assert.False(refresher.IdentityChanged(broken));
+        Assert.True(refresher.IdentityChanged(broken with { Notes = Notes.WithIdentity() }));
     }
 
     [Fact]
@@ -195,15 +462,15 @@ public sealed class RefresherTests : IDisposable
     {
         hyperV.Running.Add(Web01);
         await refresher.RefreshAsync(CancellationToken.None);
-        var first = hyperV.Kvp[Web01.Id][KvpKeys.Token];
+        var first = hyperV.Token(Web01);
 
         time.Advance(HostTokenPolicy.RefreshInterval - TokenRefresher.RenewalSlack - TimeSpan.FromSeconds(1));
         Assert.Equal(0, (await refresher.RefreshAsync(CancellationToken.None)).Written);
-        Assert.Equal(first, hyperV.Kvp[Web01.Id][KvpKeys.Token]);
+        Assert.Equal(first, hyperV.Token(Web01));
 
         time.Advance(TimeSpan.FromSeconds(1));
         Assert.Equal(1, (await refresher.RefreshAsync(CancellationToken.None)).Written);
-        Assert.NotEqual(first, hyperV.Kvp[Web01.Id][KvpKeys.Token]);
+        Assert.NotEqual(first, hyperV.Token(Web01));
     }
 
     [Fact]
@@ -239,14 +506,29 @@ public sealed class RefresherTests : IDisposable
 
         var pass = await refresher.RefreshAsync(CancellationToken.None);
         Assert.Equal((1, 1), (pass.Written, pass.Failed));
-        Assert.Contains("32768", pass.Results.Single(r => r.Vm == Web01).Error);
-        Assert.True(hyperV.Kvp.ContainsKey(Db01.Id));
+        Assert.Contains("32768", pass.Results.Single(r => r.Vm == Web01).Detail);
+        Assert.True(hyperV.HasToken(Db01));
 
         hyperV.Failing.Clear();
         time.Advance(TimeSpan.FromSeconds(30));
         pass = await refresher.RefreshAsync(CancellationToken.None);
         Assert.Equal([Web01], pass.Results.Select(r => r.Vm));
         Assert.Equal(0, pass.Failed);
+    }
+
+    [Fact]
+    public async Task FailedRemovalIsRetriedNextPass()
+    {
+        hyperV.Kvp[Bare01.Id] = new() { [KvpKeys.Token] = "old" };
+        hyperV.Running.Add(Bare01);
+        hyperV.Failing.Add(Bare01.Id);
+
+        Assert.Equal(VmTokenOutcome.Failed, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+        Assert.True(hyperV.HasToken(Bare01));
+
+        hyperV.Failing.Clear();
+        Assert.Equal(VmTokenOutcome.NotEnrolled, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+        Assert.False(hyperV.HasToken(Bare01));
     }
 
     [Fact]
@@ -286,9 +568,9 @@ public sealed class RefresherTests : IDisposable
     }
 
     [Fact]
-    public async Task OldestTokenAgeTracksFailingVm()
+    public async Task OldestTokenAgeTracksFailingVmAndIgnoresVmsWithoutIdentity()
     {
-        hyperV.Running.AddRange([Web01, Db01]);
+        hyperV.Running.AddRange([Web01, Db01, Bare01]);
         await refresher.RefreshAsync(CancellationToken.None);
 
         hyperV.Failing.Add(Web01.Id);
@@ -299,21 +581,45 @@ public sealed class RefresherTests : IDisposable
         Assert.Equal(HostTokenPolicy.RefreshInterval + TimeSpan.FromMinutes(1), refresher.OldestTokenAge());
     }
 
+    [Fact]
+    public async Task GaugesCountVmsByWhatTheirNotesSay()
+    {
+        hyperV.Running.AddRange([Web01, Db01, Bare01, Web01 with { Id = Guid.NewGuid().ToString("D"), Notes = Notes.WithIdentity(tenant: "-") }]);
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        var gauges = new Dictionary<string, double>();
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            // Only this test's meter: other tests running at the same time have refreshers of their own.
+            if (instrument.Meter.Name == TokenRefresher.MeterName && instrument.Meter.Scope == services.GetRequiredService<IMeterFactory>())
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<double>((instrument, value, _, _) => gauges[instrument.Name] = value);
+        listener.SetMeasurementEventCallback<int>((instrument, value, _, _) => gauges[instrument.Name] = value);
+        listener.Start();
+        listener.RecordObservableInstruments();
+
+        Assert.Equal(4, gauges["proof.refresher.running_vms"]);
+        Assert.Equal(2, gauges["proof.refresher.enrolled_vms"]);
+        Assert.Equal(1, gauges["proof.refresher.identity_errors"]);
+    }
+
     // Options.
 
     [Theory]
-    [InlineData("https://proof.test", "hv-host-01", null, true)]
-    [InlineData("https://proof.test", "hv-host-01", "prod", true)]
-    [InlineData("http://proof.test", "hv-host-01", null, false)]
-    [InlineData("https://proof.test/", "hv-host-01", null, false)]
-    [InlineData("https://proof.test", "", null, false)]
-    [InlineData("https://proof.test", "hv host", null, false)]
-    [InlineData("https://proof.test", "hv-host-01: x", null, false)]
-    [InlineData("https://proof.test", "hv-host-01", "", false)]
-    [InlineData("https://proof.test", "hv-host-01", "-prod", false)]
-    public void ValidatesOptions(string issuerUrl, string hostId, string? cluster, bool valid)
+    [InlineData("https://proof.test", "hv-host-01", true)]
+    [InlineData("http://proof.test", "hv-host-01", false)]
+    [InlineData("https://proof.test/", "hv-host-01", false)]
+    [InlineData("https://proof.test", "", false)]
+    [InlineData("https://proof.test", "hv host", false)]
+    [InlineData("https://proof.test", "hv-host-01: x", false)]
+    [InlineData("https://proof.test", "hv-host-01\n", false)]
+    public void ValidatesOptions(string issuerUrl, string hostId, bool valid)
     {
-        var result = new RefresherOptionsValidator().Validate(null, new RefresherOptions { IssuerUrl = issuerUrl, HostId = hostId, Cluster = cluster });
+        var result = new RefresherOptionsValidator().Validate(null, new RefresherOptions { IssuerUrl = issuerUrl, HostId = hostId });
 
         Assert.Equal(valid, result.Succeeded);
     }

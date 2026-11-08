@@ -10,7 +10,7 @@ Proof has four zones, and each one trusts the one before it.
 
 | Zone | Who is in it | What it is trusted for |
 | ---- | ------------ | ---------------------- |
-| **Hyper-V host** | The host OS and its administrators | Saying which VM is which. Anyone who can administer the host can use its signing key, read VM notes and impersonate any VM on it |
+| **Hyper-V host** | The host OS and its administrators, and anyone who can write its VMs' notes | Saying which VM is which, and what its notes say it is for. Anyone who can administer the host can use its signing key, read and change VM notes and impersonate any VM on it |
 | **Issuer** | The issuer service and whoever controls its signing key and allowlist | Deciding which hosts to believe, and vouching for them to everyone else |
 | **VM** | Every program running in the guest | Nothing beyond its own identity. See below |
 | **Consumers** | Services that accept Proof's JWTs | Deciding what an identified VM may do |
@@ -25,9 +25,26 @@ The chain of trust is short:
 This means:
 
 - **Compromising a VM** gets an attacker that VM's identity, and nothing else. They cannot obtain tokens for other VMs.
-- **Compromising a host** (or its administrator) gets an attacker the identity of every VM on that host, and of VMs they claim to be running. Treat hosts that run Proof like the domain controllers of this system. If a host is lost, remove its key from the allowlist.
+- **Compromising a host** (or its administrator) gets an attacker the identity of every VM on that host, and of VMs they claim to be running, with any tenant and tags they like. Treat hosts that run Proof like the domain controllers of this system. If a host is lost, remove its key from the allowlist.
 - **Compromising the issuer's signing key** lets an attacker mint a JWT for any identity. Store it carefully, back it up, and limit who can read it.
 - **Compromising the allowlist** lets an attacker add their own host. Change it only through reviewed changes.
+
+## VM identity and who sets it
+
+Each JWT carries a tenant, an assigned ID and security tags, taken from the [`identity:` block](refresher.md#vm-identity) in the VM's Hyper-V notes. Consumers can authorize on them, which makes **VM notes an authorization input.** Whoever can write a VM's notes decides what tenant, assigned ID and tags its tokens carry. That includes:
+
+- Hyper-V host administrators, and members of Hyper-V Administrators.
+- Anyone you have delegated VM administration to, through Hyper-V's own permissions or a management tool such as System Center.
+- Any service that holds Hyper-V Administrators. Proof's own `proof-metadata-host` service is one: it edits notes to clear secrets, so a compromise of it, the code that talks to guests, could also rewrite any VM's identity on that host.
+- Restore, import and replication tools, which bring back a VM's notes with it.
+
+Adding an identity widens what each of those accounts can do, from administering VMs to deciding what the VMs are allowed to reach. Review who holds them with that in mind.
+
+Everything attached to one issuer is **one trust environment**: every host on its allowlist is run by one operator, and any of them may vouch for any tenant or tags. The allowlist doesn't limit which tenants or tags a host may assert, and the subject doesn't name the host that signed. Proof can't separate tenants from each other, because the only way to set a VM's identity is through the Hyper-V API. A deployment where tenants mustn't be able to set each other's identity needs a layer in front of that API that controls who may write which VMs' notes, or a separate issuer and hosts for each.
+
+Proof is still only an identity provider. A tenant or a tag is an assertion about a VM, not a permission. Your services decide what a VM with that identity may do, and should grant no more than it needs.
+
+**Changing or removing an identity isn't instant revocation.** The refresher replaces or removes the VM's token within about a second, so the normal path, `proof token` inside the VM, stops getting the old identity straight away. But a host token already copied out of the VM stays valid for up to 20 minutes, and a JWT already issued for up to 10 (5 by default). If a VM may have been compromised, assume it holds its old identity until those times have passed.
 
 ## What a process inside a VM can do
 
@@ -89,7 +106,7 @@ Inside the VM, the local endpoint is on loopback only. It also refuses requests 
 - **Hyper-V Manager's settings dialog saves the notes it opened with.** If it is open when secrets are cleared, saving it can put them back in the notes. They aren't served again, and the next clear removes them.
 - **Audiences are not authorization.** Unless you set `AllowedAudiences`, any VM can request a token for any audience. Consumers must check `iss` and `sub`, and decide for themselves whether that VM may do what it is asking.
 - **Tokens are bearer credentials.** Keep them out of logs and URLs. Proof's own logs never contain them.
-- **VM IDs are not unique forever.** An imported or restored VM keeps its ID, so two VMs on different clusters can share one. That's why the identity includes the cluster or host, taken from the allowlist and never from the token.
+- **Subjects are not guaranteed unique.** Proof keeps no state across VMs, so it doesn't stop two VMs from being given the same tenant and assigned ID; their VM IDs still tell them apart. A VM restored or imported with its ID kept also keeps its notes, so a copy running beside the original has the same subject. Give a copy a new identity, or import it with a new ID, before both run.
 - **Names are not identity.** `vm_name` can change at any time. Don't authorize on it.
 - **Clocks matter.** Everything is time-limited, and the allowed skew is two minutes. Keep everything on NTP.
 
@@ -98,6 +115,7 @@ Inside the VM, the local endpoint is on loopback only. It also refuses requests 
 - Only `ES256` is accepted. The `none` algorithm, HMAC algorithms and encrypted tokens are always rejected, and the token header can't choose how it is verified.
 - Host tokens and issued JWTs have different types and audiences, so one can never be accepted as the other.
 - The issuer only trusts keys on its allowlist. It never fetches a key from a URL in a token.
+- Identity values are checked twice: the refresher refuses a block that breaks the rules, and the issuer refuses a host token whose values aren't in their one accepted form, rather than correcting them. Nothing is guessed or filled in from the VM's name.
 - Token size is limited before parsing, `/token` is rate limited, and callers get generic errors while details go to the log.
 - Settings files on the host and in Windows images must be owned and writable only by administrators, or the program refuses to start.
 - Dependencies are pinned with lock files, and the issuer image runs as a non-root user on a minimal base image with no shell.
