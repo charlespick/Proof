@@ -4,17 +4,17 @@ using Microsoft.Extensions.Options;
 namespace Proof.Refresher;
 
 /// <summary>
-/// Runs a refresh pass at start, whenever Hyper-V reports a VM starting or migrating in, and on a fixed schedule
-/// every <see cref="RefresherOptions.ScanInterval"/>. Event passes do not move the schedule. The schedule renews
-/// tokens and catches starts whose events were missed; after a failure the next pass comes sooner.
+/// Runs a refresh pass at start, whenever Hyper-V reports a VM starting or migrating in or a change to a VM's
+/// identity, and on a fixed schedule every <see cref="RefresherOptions.ScanInterval"/>. Event passes do not move the
+/// schedule. The schedule renews tokens and catches events that were missed; after a failure the next pass comes sooner.
 /// </summary>
 public sealed class Worker(
     TokenRefresher refresher, HostTokenSigner signer, IHyperVHost hyperV, IOptions<RefresherOptions> options, TimeProvider time, ILogger<Worker> logger)
     : BackgroundService
 {
-    // One pending wake-up is enough: a pass covers every running VM, so a burst of starts coalesces into it.
+    // One pending wake-up is enough: a pass covers every running VM, so a burst of events coalesces into it.
     private readonly Channel<bool> wake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
-    private IVmStartSubscription? subscription;
+    private IVmSubscription? subscription;
     private bool subscriptionFailureLogged;
 
     /// <summary>How soon to try again after a failed write, a failed pass or a lost subscription.</summary>
@@ -24,8 +24,8 @@ public sealed class Worker(
     {
         var o = options.Value;
         logger.LogInformation(
-            "Refresher started for host {HostId} (cluster {Cluster}), key {Kid}, audience {IssuerUrl}, scanning every {ScanInterval}.",
-            o.HostId, o.Cluster ?? "none", signer.Kid, o.IssuerUrl, o.ScanInterval);
+            "Refresher started for host {HostId}, key {Kid}, audience {IssuerUrl}, scanning every {ScanInterval}.",
+            o.HostId, signer.Kid, o.IssuerUrl, o.ScanInterval);
 
         var nextScan = time.GetUtcNow();
         try
@@ -68,10 +68,11 @@ public sealed class Worker(
         try
         {
             var pass = await refresher.RefreshAsync(stoppingToken);
-            if (pass.Written > 0 || pass.Failed > 0)
+            if (pass.Written > 0 || pass.Refused > 0 || pass.Failed > 0)
             {
                 logger.LogInformation(
-                    "Refresh pass: {Running} running VMs, {Written} tokens written, {Failed} failed.", pass.Running, pass.Written, pass.Failed);
+                    "Refresh pass: {Running} running VMs, {Written} tokens written, {Refused} refused for their identity, {Failed} failed.",
+                    pass.Running, pass.Written, pass.Refused, pass.Failed);
             }
 
             return pass.Failed == 0;
@@ -113,10 +114,10 @@ public sealed class Worker(
         subscription = null;
         try
         {
-            subscription = hyperV.WatchVmStarts(OnVmStarted, OnSubscriptionStopped);
+            subscription = hyperV.WatchVms(OnVmStarted, OnNotesChanged, OnSubscriptionStopped);
             if (renewing || subscriptionFailureLogged)
             {
-                logger.LogInformation("Watching for VM starts again.");
+                logger.LogInformation("Watching for VM starts and notes changes again.");
             }
 
             subscriptionFailureLogged = false;
@@ -126,7 +127,8 @@ public sealed class Worker(
         {
             if (!subscriptionFailureLogged)
             {
-                logger.LogWarning(ex, "Cannot watch for VM starts; new VMs wait for the next pass. Retrying every {RetryDelay}.", RetryDelay);
+                logger.LogWarning(
+                    ex, "Cannot watch for VM starts and notes changes; they wait for the next pass. Retrying every {RetryDelay}.", RetryDelay);
                 subscriptionFailureLogged = true;
             }
 
@@ -134,15 +136,28 @@ public sealed class Worker(
         }
     }
 
-    private void OnVmStarted(VirtualMachine vm)
+    private void OnVmStarted(string vmId, string vmName)
     {
-        logger.LogDebug("VM {VmId} ({VmName}) started or migrated in; refreshing now.", vm.Id, vm.Name);
+        logger.LogDebug("VM {VmId} ({VmName}) started or migrated in; refreshing now.", vmId, vmName);
         wake.Writer.TryWrite(true);
+    }
+
+    /// <summary>
+    /// Hyper-V reports many notes changes that leave the identity as it was, among them the metadata service clearing
+    /// sensitive values, so a pass runs only when the VM's token must change.
+    /// </summary>
+    private void OnNotesChanged(VirtualMachine vm)
+    {
+        if (refresher.IdentityChanged(vm))
+        {
+            logger.LogDebug("VM {VmId} ({VmName}): its identity changed; refreshing now.", vm.Id, vm.Name);
+            wake.Writer.TryWrite(true);
+        }
     }
 
     private void OnSubscriptionStopped()
     {
-        logger.LogWarning("The VM start subscription ended; renewing it.");
+        logger.LogWarning("The VM event subscription ended; renewing it.");
         wake.Writer.TryWrite(true);
     }
 

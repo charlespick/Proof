@@ -10,7 +10,7 @@ namespace Proof.Refresher.Metadata;
 public sealed class VmMetadataException(string message) : Exception(message);
 
 /// <summary>
-/// A VM's instance metadata: YAML in its Hyper-V notes between two marker lines. Everything
+/// A VM's instance metadata and identity: YAML in its Hyper-V notes between two marker lines. Everything
 /// outside the markers belongs to the operator and is never read, served or changed.
 /// </summary>
 public sealed class VmMetadataBlock
@@ -24,11 +24,16 @@ public sealed class VmMetadataBlock
     /// <summary>What a sensitive value becomes: this tag and the time it was cleared. Never served.</summary>
     public const string ClearedTag = "!cleared";
 
+    private const string IdentityKey = "identity";
     private const string MetaDataKey = "meta-data";
     private const string UserDataKey = "user-data";
     private const string NetworkDataKey = "network-data";
     private const string ProvisioningKey = "provisioning";
     private const string StatusKey = "status";
+
+    private const string TenantKey = "tenant";
+    private const string AssignedIdKey = "assigned-id";
+    private const string SecurityTagsKey = "security-tags";
 
     /// <summary>EC2's name for the instance ID, which the provisioning record also uses.</summary>
     private const string InstanceIdKey = "instance-id";
@@ -64,10 +69,17 @@ public sealed class VmMetadataBlock
         root = Load(yaml);
         Validate();
         Provisioning = ReadProvisioning(root);
+        Identity = ReadIdentity(root);
     }
 
     /// <summary>One of <see cref="ProvisioningStatus"/>. A block that does not say is pending.</summary>
     public string Provisioning { get; }
+
+    /// <summary>
+    /// The VM's identity, or null if the block has no <c>identity:</c>. Never served to the guest: the guest gets only
+    /// the host token that carries it.
+    /// </summary>
+    public VmIdentity? Identity { get; }
 
     /// <summary>How many values are marked sensitive and have not been cleared.</summary>
     public int SensitiveCount => Scalars(root).Count(IsSensitive);
@@ -325,6 +337,57 @@ public sealed class VmMetadataBlock
             : throw new VmMetadataException($"{ProvisioningKey} must be {ProvisioningStatus.Pending}, {ProvisioningStatus.Complete} or {ProvisioningStatus.Failed}.");
     }
 
+    /// <summary>
+    /// The identity, with the tenant and assigned ID lowercased (DNS names are case-insensitive) and every value then
+    /// held to <see cref="VmIdentity"/>'s rules. Nothing is guessed: a value that breaks a rule makes the block unusable.
+    /// </summary>
+    private static VmIdentity? ReadIdentity(YamlMappingNode root)
+    {
+        if (Child(root, IdentityKey) is not { } node)
+        {
+            return null;
+        }
+
+        if (node is not YamlMappingNode identity)
+        {
+            throw new VmMetadataException($"{IdentityKey} must be a mapping with {TenantKey}, {AssignedIdKey} and optionally {SecurityTagsKey}.");
+        }
+
+        // Identity is not a secret and is never cleared, so no tag, !sensitive included, belongs in it.
+        if (Descendants(identity).Any(n => !n.Tag.IsEmpty && !IsStandard(n.Tag)))
+        {
+            throw new VmMetadataException($"{IdentityKey} must not use {SensitiveTag} or any other tag. Identity is not a secret, and it stays in the notes.");
+        }
+
+        foreach (var key in identity.Children.Keys)
+        {
+            // A misspelled security-tags must not silently grant nothing.
+            if (key is not YamlScalarNode { Value: TenantKey or AssignedIdKey or SecurityTagsKey })
+            {
+                throw new VmMetadataException($"The only keys under {IdentityKey} are {TenantKey}, {AssignedIdKey} and {SecurityTagsKey}.");
+            }
+        }
+
+        string? Text(string key) => Child(identity, key) switch
+        {
+            null => null,
+            YamlScalarNode scalar => scalar.Value?.ToLowerInvariant(),
+            _ => throw new VmMetadataException($"{IdentityKey}.{key} must be a string."),
+        };
+
+        var tags = Child(identity, SecurityTagsKey) switch
+        {
+            null => [],
+            YamlSequenceNode sequence when sequence.Children.All(c => c is YamlScalarNode) =>
+                sequence.Children.Select(c => ((YamlScalarNode)c).Value ?? "").ToList(),
+            _ => throw new VmMetadataException($"{IdentityKey}.{SecurityTagsKey} must be a list of strings, such as [a, b], or [] for none."),
+        };
+
+        return VmIdentity.TryCreate(Text(TenantKey), Text(AssignedIdKey), tags, out var result, out var problem)
+            ? result
+            : throw new VmMetadataException($"In {IdentityKey}, {problem}");
+    }
+
     private void Validate()
     {
         // First, so that nothing below meets a shared node or a tagged key.
@@ -332,9 +395,9 @@ public sealed class VmMetadataBlock
 
         foreach (var key in root.Children.Keys)
         {
-            if (key is not YamlScalarNode { Value: MetaDataKey or UserDataKey or NetworkDataKey or ProvisioningKey })
+            if (key is not YamlScalarNode { Value: IdentityKey or MetaDataKey or UserDataKey or NetworkDataKey or ProvisioningKey })
             {
-                throw new VmMetadataException($"The only top-level keys are {MetaDataKey}, {UserDataKey}, {NetworkDataKey} and {ProvisioningKey}. A misspelled key would be ignored, and a value meant to be sensitive could stay in the notes.");
+                throw new VmMetadataException($"The only top-level keys are {IdentityKey}, {MetaDataKey}, {UserDataKey}, {NetworkDataKey} and {ProvisioningKey}. A misspelled key would be ignored, and a value meant to be sensitive could stay in the notes.");
             }
         }
 
@@ -512,5 +575,13 @@ public sealed class VmMetadataBlock
         YamlMappingNode mapping => mapping.Children.Values.SelectMany(Scalars),
         YamlSequenceNode sequence => sequence.Children.SelectMany(Scalars),
         _ => [],
+    };
+
+    /// <summary>The values under <paramref name="node"/>, at every level, and the node itself.</summary>
+    private static IEnumerable<YamlNode> Descendants(YamlNode node) => node switch
+    {
+        YamlMappingNode mapping => mapping.Children.Values.SelectMany(Descendants).Prepend(mapping),
+        YamlSequenceNode sequence => sequence.Children.SelectMany(Descendants).Prepend(sequence),
+        _ => [node],
     };
 }

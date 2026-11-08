@@ -3,25 +3,35 @@ using System.Runtime.Versioning;
 
 namespace Proof.Refresher;
 
-/// <summary>The two things the refresher needs from Hyper-V. Faked in tests.</summary>
+/// <summary>A running VM on this host.</summary>
+/// <param name="Id">The VM ID as a lowercase hyphenated GUID.</param>
+/// <param name="Name">The VM name now. Mutable and informational.</param>
+/// <param name="Notes">The VM's notes, where its <c>identity:</c> block is, or null if it has none.</param>
+public sealed record VirtualMachine(string Id, string Name, string? Notes);
+
+/// <summary>What the refresher needs from Hyper-V. Faked in tests.</summary>
 public interface IHyperVHost
 {
-    /// <summary>The VMs running on this host now.</summary>
+    /// <summary>The VMs running on this host now, with their notes.</summary>
     Task<IReadOnlyList<VirtualMachine>> GetRunningVirtualMachinesAsync(CancellationToken cancellationToken);
 
     /// <summary>Creates or replaces a key in the VM's KVP External pool.</summary>
     Task WriteKvpItemAsync(VirtualMachine vm, string name, string value, CancellationToken cancellationToken);
 
+    /// <summary>Removes a key from the VM's KVP External pool. Removing a key that is not there succeeds.</summary>
+    Task RemoveKvpItemAsync(VirtualMachine vm, string name, CancellationToken cancellationToken);
+
     /// <summary>
-    /// Calls <paramref name="onStarted"/> when a VM starts running on this host, including one arriving by live
-    /// migration, and <paramref name="onStopped"/> if the subscription ends on its own. Callbacks run on a WMI
-    /// thread and must not block. Dispose the result to stop.
+    /// Calls <paramref name="onStarted"/> with a VM's ID and name when it starts running on this host, including one
+    /// arriving by live migration; <paramref name="onNotesChanged"/> when a VM's notes change, whether or not it is
+    /// running; and <paramref name="onStopped"/> if the subscription ends on its own. Callbacks run on a WMI thread
+    /// and must not block. Dispose the result to stop.
     /// </summary>
-    IVmStartSubscription WatchVmStarts(Action<VirtualMachine> onStarted, Action onStopped);
+    IVmSubscription WatchVms(Action<string, string> onStarted, Action<VirtualMachine> onNotesChanged, Action onStopped);
 }
 
 /// <summary>A subscription that can end on its own, for example when the WMI service restarts.</summary>
-public interface IVmStartSubscription : IDisposable
+public interface IVmSubscription : IDisposable
 {
     bool IsActive { get; }
 }
@@ -57,9 +67,9 @@ public interface IVmNotes
 /// </summary>
 /// <remarks>
 /// Measured on Windows Server 2025: <c>ModifyKvpItems</c> fails with 32779 (not found) for a missing key, and
-/// <c>AddKvpItems</c> fails with 32773 (invalid parameter) for an existing one, so an upsert is Modify, then Add
-///. Both work whether or not the VM is running and whether or not its Data Exchange service is on;
-/// the guest sees the item once both are.
+/// <c>AddKvpItems</c> fails with 32773 (invalid parameter) for an existing one, so an upsert is Modify, then Add.
+/// <c>RemoveKvpItems</c> succeeds whether or not the key is there. All of them work whether or not the VM is running
+/// and whether or not its Data Exchange service is on; the guest sees the change once both are.
 /// </remarks>
 [SupportedOSPlatform("windows")]
 public sealed class WmiHyperVHost : IHyperVHost, IVmNotes
@@ -85,29 +95,67 @@ public sealed class WmiHyperVHost : IHyperVHost, IVmNotes
     public Task<IReadOnlyList<VirtualMachine>> GetRunningVirtualMachinesAsync(CancellationToken cancellationToken)
     {
         var scope = Connect();
-        var result = new List<VirtualMachine>();
-        using var searcher = new ManagementObjectSearcher(
-            scope, new ObjectQuery("SELECT Name, ElementName, EnabledState FROM Msvm_ComputerSystem"));
-        using var systems = searcher.Get();
-        foreach (var system in systems.Cast<ManagementObject>())
+        var running = new List<(Guid Id, string Name)>();
+        using (var searcher = new ManagementObjectSearcher(
+            scope, new ObjectQuery("SELECT Name, ElementName, EnabledState FROM Msvm_ComputerSystem")))
+        using (var systems = searcher.Get())
         {
-            using (system)
+            foreach (var system in systems.Cast<ManagementObject>())
             {
-                // The host itself is also an Msvm_ComputerSystem; VMs are the ones named by a GUID. Caption would
-                // tell them apart too, but it is localized.
-                if (Guid.TryParse(system["Name"] as string, out var id)
-                    && system["EnabledState"] is ushort state
-                    && state == EnabledStateEnabled)
+                using (system)
                 {
-                    result.Add(new VirtualMachine(id.ToString("D"), system["ElementName"] as string ?? ""));
+                    // The host itself is also an Msvm_ComputerSystem; VMs are the ones named by a GUID. Caption would
+                    // tell them apart too, but it is localized.
+                    if (Guid.TryParse(system["Name"] as string, out var id)
+                        && system["EnabledState"] is ushort state
+                        && state == EnabledStateEnabled)
+                    {
+                        running.Add((id, system["ElementName"] as string ?? ""));
+                    }
                 }
             }
         }
 
-        return Task.FromResult<IReadOnlyList<VirtualMachine>>(result);
+        // One query for every VM's notes rather than one per VM. A running VM always has settings; one missing here
+        // was deleted between the two queries, and is left for the next pass.
+        var notes = new Dictionary<Guid, string?>();
+        using (var searcher = new ManagementObjectSearcher(
+            scope, new ObjectQuery($"SELECT VirtualSystemIdentifier, Notes FROM Msvm_VirtualSystemSettingData WHERE {RealizedSettings}")))
+        using (var settings = searcher.Get())
+        {
+            foreach (var s in settings.Cast<ManagementObject>())
+            {
+                using (s)
+                {
+                    if (Guid.TryParse(s["VirtualSystemIdentifier"] as string, out var id))
+                    {
+                        notes[id] = NotesOf(s);
+                    }
+                }
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<VirtualMachine>>(running
+            .Where(vm => notes.ContainsKey(vm.Id))
+            .Select(vm => new VirtualMachine(vm.Id.ToString("D"), vm.Name, notes[vm.Id]))
+            .ToList());
     }
 
-    public async Task WriteKvpItemAsync(VirtualMachine vm, string name, string value, CancellationToken cancellationToken)
+    public Task WriteKvpItemAsync(VirtualMachine vm, string name, string value, CancellationToken cancellationToken) =>
+        ChangeKvpAsync(vm, name, value, UpsertAsync, cancellationToken);
+
+    public Task RemoveKvpItemAsync(VirtualMachine vm, string name, CancellationToken cancellationToken) =>
+        ChangeKvpAsync(
+            vm,
+            name,
+            "",
+            (scope, service, system, item, ct) => InvokeAsync(scope, service, system, "RemoveKvpItems", item, ct),
+            cancellationToken);
+
+    private delegate Task<(uint Code, string? Message)> KvpChange(
+        ManagementScope scope, ManagementObject service, ManagementObject system, string item, CancellationToken cancellationToken);
+
+    private static async Task ChangeKvpAsync(VirtualMachine vm, string name, string value, KvpChange change, CancellationToken cancellationToken)
     {
         var scope = Connect();
         using var service = GetSingle(scope, "SELECT * FROM Msvm_VirtualSystemManagementService");
@@ -115,20 +163,20 @@ public sealed class WmiHyperVHost : IHyperVHost, IVmNotes
         using var system = GetSingle(scope, $"SELECT * FROM Msvm_ComputerSystem WHERE Name = '{Guid.Parse(vm.Id):D}'");
         var item = CreateDataItem(scope, name, value);
 
-        // A VM that has just migrated in reports Running a moment before it accepts KVP writes, and refuses them with
+        // A VM that has just migrated in reports Running a moment before it accepts KVP changes, and refuses them with
         // 32775 (invalid state) until then: about 200 ms on Windows Server 2025. Retry briefly rather than wait for
         // the next pass.
         var deadline = DateTime.UtcNow + InvalidStateRetryLimit;
-        var result = await UpsertAsync(scope, service, system, item, cancellationToken);
+        var result = await change(scope, service, system, item, cancellationToken);
         while (result.Code == ErrorInvalidState && DateTime.UtcNow < deadline)
         {
             await Task.Delay(InvalidStateRetryDelay, cancellationToken);
-            result = await UpsertAsync(scope, service, system, item, cancellationToken);
+            result = await change(scope, service, system, item, cancellationToken);
         }
 
         if (result.Code != ReturnCompleted)
         {
-            throw new KvpWriteException(result.Message ?? $"KVP write failed with error {result.Code}.", result.Code);
+            throw new KvpWriteException(result.Message ?? $"KVP change failed with error {result.Code}.", result.Code);
         }
     }
 
@@ -163,15 +211,14 @@ public sealed class WmiHyperVHost : IHyperVHost, IVmNotes
         {
             return Guid.TryParse(settings["VirtualSystemIdentifier"] as string, out var id)
                 && Guid.TryParse(settings["BIOSGUID"] as string, out var biosGuid)
-                ? new VmSettings(
-                    id,
-                    settings["ElementName"] as string ?? "",
-                    biosGuid,
-                    // An array, though Hyper-V's own tools write one element holding the whole text.
-                    settings["Notes"] is string[] notes ? string.Join("\r\n", notes) : null)
+                ? new VmSettings(id, settings["ElementName"] as string ?? "", biosGuid, NotesOf(settings))
                 : null;
         }
     }
+
+    /// <summary>An array, though Hyper-V's own tools write one element holding the whole text.</summary>
+    private static string? NotesOf(ManagementBaseObject settings) =>
+        settings["Notes"] is string[] notes ? string.Join("\r\n", notes) : null;
 
     /// <summary>
     /// The settings in the text form the method takes, with the notes as written. Left to itself GetText emits a bare
@@ -230,22 +277,34 @@ public sealed class WmiHyperVHost : IHyperVHost, IVmNotes
     }
 
     /// <remarks>
-    /// The Hyper-V provider raises intrinsic events itself, so no <c>WITHIN</c> polling clause is needed; measured on
-    /// Windows Server 2025, events arrive within milliseconds of the state change. The provider also raises many
-    /// modification events that change nothing, so the query keeps only running VMs and the handler drops
-    /// modifications of a VM that was already running. A live migration arrives on the destination as a creation
-    /// in state 10 (starting) followed by a change to 2 (running), and its KVP items come with it.
+    /// The Hyper-V provider raises intrinsic events itself, so no <c>WITHIN</c> polling clause is needed. Measured on
+    /// Windows Server 2025:
+    /// <list type="bullet">
+    /// <item>VM state changes arrive within milliseconds. The provider also raises many modification events that change
+    /// nothing, so the query keeps only running VMs and the handler drops modifications of a VM that was already
+    /// running. A live migration arrives on the destination as a creation in state 10 (starting) followed by a change
+    /// to 2 (running), and its KVP items come with it.</item>
+    /// <item>A change to a VM's notes arrives about 100 ms after <c>Set-VM -Notes</c> returns, as a modification of its
+    /// realized settings carrying the notes before and after. Changes to memory or processors, which are other
+    /// classes, and starting the VM raise none; the handler still drops any whose notes are unchanged.</item>
+    /// </list>
     /// </remarks>
-    public IVmStartSubscription WatchVmStarts(Action<VirtualMachine> onStarted, Action onStopped)
+    public IVmSubscription WatchVms(Action<string, string> onStarted, Action<VirtualMachine> onNotesChanged, Action onStopped)
     {
-        var watcher = new ManagementEventWatcher(
-            Connect(),
+        var scope = Connect();
+        var starts = new ManagementEventWatcher(
+            scope,
             new WqlEventQuery(
                 "SELECT * FROM __InstanceOperationEvent WHERE TargetInstance ISA 'Msvm_ComputerSystem' "
                 + $"AND TargetInstance.EnabledState = {EnabledStateEnabled}"));
-        var subscription = new WmiSubscription(watcher);
+        var notes = new ManagementEventWatcher(
+            scope,
+            new WqlEventQuery(
+                "SELECT * FROM __InstanceModificationEvent WHERE TargetInstance ISA 'Msvm_VirtualSystemSettingData' "
+                + $"AND TargetInstance.{RealizedSettings}"));
+        var subscription = new WmiSubscription([starts, notes], onStopped);
 
-        watcher.EventArrived += (_, e) =>
+        starts.EventArrived += (_, e) =>
         {
             using var ev = e.NewEvent;
             if (ev.ClassPath.ClassName == "__InstanceDeletionEvent"
@@ -263,47 +322,81 @@ public sealed class WmiHyperVHost : IHyperVHost, IVmNotes
                 return;
             }
 
-            onStarted(new VirtualMachine(id.ToString("D"), target["ElementName"] as string ?? ""));
+            onStarted(id.ToString("D"), target["ElementName"] as string ?? "");
         };
-        watcher.Stopped += (_, _) =>
+        notes.EventArrived += (_, e) =>
         {
-            if (subscription.MarkStopped())
+            using var ev = e.NewEvent;
+            if (ev["TargetInstance"] is not ManagementBaseObject target
+                || !Guid.TryParse(target["VirtualSystemIdentifier"] as string, out var id))
             {
-                onStopped();
+                return;
             }
+
+            var now = NotesOf(target);
+            if (ev["PreviousInstance"] is ManagementBaseObject previous && NotesOf(previous) == now)
+            {
+                return;
+            }
+
+            onNotesChanged(new VirtualMachine(id.ToString("D"), target["ElementName"] as string ?? "", now));
         };
-        watcher.Start();
+
+        try
+        {
+            starts.Start();
+            notes.Start();
+        }
+        catch
+        {
+            subscription.Dispose();
+            throw;
+        }
+
         return subscription;
     }
 
-    private sealed class WmiSubscription(ManagementEventWatcher watcher) : IVmStartSubscription
+    /// <summary>Several watchers that live and die together: when WMI ends one, the owner renews them all.</summary>
+    private sealed class WmiSubscription : IVmSubscription
     {
-        private volatile bool active = true;
+        private readonly ManagementEventWatcher[] watchers;
+        private int stopped;
         private volatile bool disposed;
 
-        public bool IsActive => active;
-
-        /// <summary>True if WMI ended the subscription, false if it was disposed.</summary>
-        public bool MarkStopped()
+        public WmiSubscription(ManagementEventWatcher[] watchers, Action onStopped)
         {
-            active = false;
-            return !disposed;
+            this.watchers = watchers;
+            foreach (var watcher in watchers)
+            {
+                watcher.Stopped += (_, _) =>
+                {
+                    // Once, and not for a stop that Dispose caused.
+                    if (Interlocked.Exchange(ref stopped, 1) == 0 && !disposed)
+                    {
+                        onStopped();
+                    }
+                };
+            }
         }
+
+        public bool IsActive => Volatile.Read(ref stopped) == 0 && !disposed;
 
         public void Dispose()
         {
             disposed = true;
-            active = false;
-            try
+            foreach (var watcher in watchers)
             {
-                watcher.Stop();
-            }
-            catch (ManagementException)
-            {
-                // Already stopped by WMI.
-            }
+                try
+                {
+                    watcher.Stop();
+                }
+                catch (ManagementException)
+                {
+                    // Already stopped by WMI.
+                }
 
-            watcher.Dispose();
+                watcher.Dispose();
+            }
         }
     }
 

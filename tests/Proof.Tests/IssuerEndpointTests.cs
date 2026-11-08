@@ -75,28 +75,43 @@ public sealed class IssuerEndpointTests : IDisposable
         Assert.Equal("JWT", jwt.Typ);
         Assert.Equal(ProofKeys.CreatePublicJwk(app.SigningKey).Kid, jwt.Kid);
         Assert.Equal(TestHost.IssuerUrl, jwt.Issuer);
-        Assert.Equal("cluster:prod/" + TestHost.VmId, jwt.Subject);
+        Assert.Equal("tenant:acme:assignedID:web01.prod.example.com:vmID:" + TestHost.VmId, jwt.Subject);
         Assert.Equal("my-service", jwt.GetPayloadValue<string>("aud"));
+        Assert.Equal("acme", jwt.GetPayloadValue<string>("tenant"));
+        Assert.Equal("web01.prod.example.com", jwt.GetPayloadValue<string>("assigned_id"));
+        Assert.Equal(TestHost.VmId, jwt.GetPayloadValue<string>("vm_id"));
         Assert.Equal(host.HostId, jwt.GetPayloadValue<string>("host"));
         Assert.Equal("web01", jwt.GetPayloadValue<string>("vm_name"));
-        Assert.Equal("prod", jwt.GetPayloadValue<string>("cluster"));
+        Assert.False(jwt.TryGetClaim("cluster", out _));
         Assert.Equal(32, jwt.Id.Length);
         Assert.Equal(TimeSpan.FromMinutes(5), jwt.ValidTo - jwt.IssuedAt);
         Assert.Equal(jwt.IssuedAt, jwt.ValidFrom);
+
+        var payload = JsonDocument.Parse(Base64UrlEncoder.Decode(jwt.EncodedPayload)).RootElement;
+        Assert.Equal(["puppet", "ssh-ca"], payload.GetProperty("security_tags").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task IssuesSecurityTagsAsAnArrayWhateverTheirNumber(int count)
+    {
+        // A consumer can always read an array: never a missing claim, and never a bare string for one tag.
+        var tags = Enumerable.Range(0, count).Select(i => $"tag{i}").ToArray();
+        var response = await PostAsync(ExchangeForm(host.CreateToken(c => c[ProofClaimNames.SecurityTags] = tags)));
+
+        var jwt = new JsonWebToken((await ReadJsonAsync(response)).GetProperty("access_token").GetString());
+        var claim = JsonDocument.Parse(Base64UrlEncoder.Decode(jwt.EncodedPayload)).RootElement.GetProperty("security_tags");
+        Assert.Equal(JsonValueKind.Array, claim.ValueKind);
+        Assert.Equal(tags, claim.EnumerateArray().Select(e => e.GetString()));
     }
 
     [Fact]
-    public async Task ScopesTheSubjectByHostForAHostInNoCluster()
+    public async Task RefusesHostTokenWithoutIdentity()
     {
-        var standalone = new TestHost("hv-lab-07", cluster: null);
-        using var standaloneApp = new IssuerApp(TestHost.Allowlist(standalone.AllowlistEntry()));
-        using var standaloneClient = standaloneApp.CreateClient();
-        var response = await standaloneClient.PostAsync(
-            TokenEndpoint.Path, new FormUrlEncodedContent(ExchangeForm(standalone.CreateToken())), TestContext.Current.CancellationToken);
+        var response = await PostAsync(ExchangeForm(host.CreateToken(c => c.Remove(ProofClaimNames.Tenant))));
 
-        var jwt = new JsonWebToken((await ReadJsonAsync(response)).GetProperty("access_token").GetString());
-        Assert.Equal("host:hv-lab-07/" + TestHost.VmId, jwt.Subject);
-        Assert.False(jwt.TryGetClaim("cluster", out _));
+        await AssertErrorAsync(response, "invalid_request");
     }
 
     [Fact]
@@ -161,6 +176,17 @@ public sealed class IssuerEndpointTests : IDisposable
         Assert.Equal(["id_token"], doc.GetProperty("response_types_supported").EnumerateArray().Select(e => e.GetString()));
         Assert.Equal(["public"], doc.GetProperty("subject_types_supported").EnumerateArray().Select(e => e.GetString()));
         Assert.Equal(["ES256"], doc.GetProperty("id_token_signing_alg_values_supported").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(
+            ["iss", "sub", "aud", "exp", "nbf", "iat", "jti", "tenant", "assigned_id", "vm_id", "security_tags", "host", "vm_name"],
+            doc.GetProperty("claims_supported").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Fact]
+    public async Task IssuedJwtCarriesOnlyClaimsTheDiscoveryDocumentLists()
+    {
+        var issued = new JsonWebToken((await ReadJsonAsync(await PostAsync(ExchangeForm(host.CreateToken())))).GetProperty("access_token").GetString());
+
+        Assert.Subset(DiscoveryEndpoints.ClaimsSupported.ToHashSet(), issued.Claims.Select(c => c.Type).ToHashSet());
     }
 
     [Fact]

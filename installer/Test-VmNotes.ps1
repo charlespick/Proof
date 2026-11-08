@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Checks instance metadata's use of Hyper-V settings against real Hyper-V: reading and rewriting a VM's notes, reading
-  its BIOS GUID and giving it a new one.
+  the identity in them, reading its BIOS GUID and giving it a new one.
 
 .DESCRIPTION
   Needs an elevated session on a machine with Hyper-V. It creates one VM with no disk, never starts it, and removes it
@@ -56,6 +56,10 @@ try {
         'Owned by the web team.'
         '#proof-metadata-begin'
         '# Written by hand, with <markup> & "quotes" and é.'
+        'identity:'
+        '  tenant: Acme'
+        '  assigned-id: web01.example.com'
+        '  security-tags: [puppet]'
         'meta-data:'
         '  hostname: web01'
         '  admin_pass: !sensitive hunter2'
@@ -74,6 +78,7 @@ try {
     Check ($result.Exit -eq 0 -and $result.Output -match 'Provisioning pending') 'a block is found through WMI, by VM ID'
     Check ($result.Output -match 'Sensitive\s+2') '...with its two sensitive values'
     Check ($result.Output -notmatch 'hunter') '...which show does not print'
+    Check ($result.Output -match "Identity\s+tenant:acme:assignedID:web01\.example\.com:vmID:$($id.ToString('D')), tags \[puppet\]") '...and its identity, as the subject it leads to'
     Check ($result.Output -match 'Serves\s+uuid, hostname, admin_pass, user-data, network-data') "...and serves the meta-data, user data and network data ($(($result.Output -split "`n" | Select-String 'Serves').Line.Trim()))"
 
     $result = Invoke-Refresher metadata finish --vm $vmName --result complete
@@ -87,6 +92,7 @@ try {
     Check ($after.Contains('# Written by hand, with <markup> & "quotes" and é.')) '...and keep the comment, markup and all'
     Check ($after.StartsWith('Owned by the web team.') -and $after.TrimEnd().EndsWith('Do not delete.')) '...and the text outside the block'
     Check ($after -match "status: complete.*instance-id: $instanceId") '...and record the status and instance'
+    Check ($after.Contains("identity:`r`n  tenant: Acme`r`n  assigned-id: web01.example.com`r`n  security-tags: [puppet]")) '...and leave the identity as it was'
     # Hyper-V Manager's text box shows a bare LF as no line break, so this is the one to look at if it fails.
     Check ($after -match "Owned by the web team\.`r`n") '...and keep CRLF line ends through the WMI write'
     Check ($after -notmatch '&#13;|&amp;') '...with no escapes left in the text'

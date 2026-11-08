@@ -10,12 +10,12 @@ namespace Proof.Tests;
 
 /// <summary>
 /// The service loop, with the default 5-minute scan: anything that happens within these tests is driven by
-/// start events or the retry delay, never by the schedule.
+/// start and notes events or the retry delay, never by the schedule.
 /// </summary>
 public sealed class WorkerTests : IAsyncDisposable
 {
-    private static readonly VirtualMachine Web01 = new(TestHost.VmId, "web01");
-    private static readonly VirtualMachine Db01 = new("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "db01");
+    private static readonly VirtualMachine Web01 = new(TestHost.VmId, "web01", Notes.WithIdentity());
+    private static readonly VirtualMachine Db01 = new("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "db01", Notes.WithIdentity(assignedId: "db01"));
     private static readonly TimeSpan Soon = TimeSpan.FromSeconds(5);
 
     private readonly ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -76,6 +76,45 @@ public sealed class WorkerTests : IAsyncDisposable
         hyperV.Start(Db01);
 
         await WaitUntil(() => hyperV.HasToken(Db01), "the VM start to trigger a pass");
+    }
+
+    [Fact]
+    public async Task IdentityChangeIsWrittenWithoutWaitingForScan()
+    {
+        hyperV.Running.Add(Web01);
+        await StartWorkerAsync();
+        await WaitUntil(() => hyperV.HasToken(Web01), "the first pass");
+        var first = hyperV.Token(Web01);
+
+        hyperV.SetNotes(Web01, Notes.WithIdentity(securityTags: "[puppet]"));
+
+        await WaitUntil(() => hyperV.Token(Web01) != first, "the notes change to trigger a pass");
+    }
+
+    [Fact]
+    public async Task IdentityRemovalTakesTheTokenAwayWithoutWaitingForScan()
+    {
+        hyperV.Running.Add(Web01);
+        await StartWorkerAsync();
+        await WaitUntil(() => hyperV.HasToken(Web01), "the first pass");
+
+        hyperV.SetNotes(Web01, Notes.WithoutIdentity);
+
+        await WaitUntil(() => !hyperV.HasToken(Web01), "the notes change to remove the token");
+    }
+
+    [Fact]
+    public async Task NotesChangeThatKeepsTheIdentityRunsNoPass()
+    {
+        hyperV.Running.Add(Web01);
+        await StartWorkerAsync();
+        await WaitUntil(() => hyperV.HasToken(Web01), "the first pass");
+        var listings = hyperV.Listings;
+
+        hyperV.SetNotes(Web01, "Edited by an operator.\r\n" + Web01.Notes);
+        await Task.Delay(500, TestContext.Current.CancellationToken);
+
+        Assert.Equal(listings, hyperV.Listings);
     }
 
     [Fact]

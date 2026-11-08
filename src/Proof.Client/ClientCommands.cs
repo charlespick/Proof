@@ -119,9 +119,13 @@ public sealed class ClientCommands(IKvpReader kvp, TimeProvider time, TextWriter
         if (info is not null)
         {
             Line("Host token", $"present in {kvp.Source}, {info.Length} characters (not shown)");
+            Line("  Subject", Display.Name(info.Subject));
+            Line("  Tenant", Display.Name(info.Tenant));
+            Line("  Assigned ID", Display.Name(info.AssignedId));
+            Line("  Security tags", info.SecurityTags is null ? "(missing)" : info.SecurityTags.Count == 0 ? "(none)" : string.Join(", ", info.SecurityTags));
             Line("  VM ID", Display.Name(info.VmId));
             Line("  VM name", Display.Name(info.VmName));
-            Line("  Signed by", $"host {Display.Name(info.Host)}{(info.Cluster is null ? "" : $", cluster {info.Cluster}")}");
+            Line("  Signed by", $"host {Display.Name(info.Host)}");
             Line("  Host key", Display.Name(info.Kid));
             Line("  Audience", Display.Name(info.Audience));
             Line("  Signed", When(info.IssuedAt, now));
@@ -235,15 +239,18 @@ public sealed class ClientCommands(IKvpReader kvp, TimeProvider time, TextWriter
         {
             stderr.WriteLine(
                 $"The host token looks right from inside the VM. The issuer may not have host {Display.Name(info!.Host)} "
-                + $"(key {Display.Name(info.Kid)}) on its allowlist, the host's cluster ({Display.Name(info.Cluster)}) may differ from its allowlist entry, "
-                + "or its clock may differ from the host's. Its log has the reason.");
+                + $"(key {Display.Name(info.Kid)}) on its allowlist, or its clock may differ from the host's. Its log has the reason.");
         }
     }
 
-    private static string MissingTokenAdvice(IReadOnlyDictionary<string, string> parameters) =>
-        $"The host writes one when the VM starts or migrates in, and every {Display.Duration(HostTokenPolicy.RefreshInterval)}. "
-        + "Retry shortly; if it stays missing, check proof-refresher on "
-        + $"{parameters.GetValueOrDefault(GuestParameterNames.PhysicalHostName) ?? "this VM's Hyper-V host"}.";
+    private static string MissingTokenAdvice(IReadOnlyDictionary<string, string> parameters)
+    {
+        var host = parameters.GetValueOrDefault(GuestParameterNames.PhysicalHostName) ?? "this VM's Hyper-V host";
+        return "The host writes one only if this VM's notes have a usable identity: block, and renews it every "
+            + $"{Display.Duration(HostTokenPolicy.RefreshInterval)}. With no identity: block there is no token, by design; "
+            + $"on {host}, proof-refresher metadata show checks the block. Otherwise retry shortly, and if it stays missing, "
+            + $"check proof-refresher on {host}.";
+    }
 
     private static string When(DateTimeOffset t, DateTimeOffset now) =>
         t == DateTimeOffset.MinValue ? "(none)"

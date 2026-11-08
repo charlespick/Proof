@@ -70,7 +70,7 @@ public sealed class ClientTests : IDisposable
         Assert.EndsWith(Environment.NewLine, printed);
         var result = await ValidateIssuedAsync(printed.TrimEnd(), "my-service");
         Assert.True(result.IsValid, result.Exception?.Message);
-        Assert.Equal(host.Subject, ((JsonWebToken)result.SecurityToken).Subject);
+        Assert.Equal(TestHost.Subject, ((JsonWebToken)result.SecurityToken).Subject);
         Assert.Empty(stderr.ToString());
     }
 
@@ -237,6 +237,10 @@ public sealed class ClientTests : IDisposable
         Assert.Equal(ExitCodes.Ok, Commands.Status(options, null));
 
         var output = stdout.ToString();
+        Assert.Contains(StatusLine("Subject", TestHost.Subject), output);
+        Assert.Contains(StatusLine("Tenant", "acme"), output);
+        Assert.Contains(StatusLine("Assigned ID", "web01.prod.example.com"), output);
+        Assert.Contains(StatusLine("Security tags", "puppet, ssh-ca"), output);
         Assert.Contains(TestHost.VmId, output);
         Assert.Contains("web01", output);
         Assert.Contains(host.Kid, output);
@@ -246,11 +250,54 @@ public sealed class ClientTests : IDisposable
     }
 
     [Fact]
-    public void StatusWithoutAHostToken()
+    public void StatusShowsNoSecurityTags()
+    {
+        kvp.Token = host.CreateToken(c => c[ProofClaimNames.SecurityTags] = Array.Empty<string>());
+
+        Assert.Equal(ExitCodes.Ok, Commands.Status(options, null));
+
+        Assert.Contains(StatusLine("Security tags", "(none)"), stdout.ToString());
+    }
+
+    /// <summary>A host token line of <c>proof status</c>: indented under its heading, values in one column.</summary>
+    private static string StatusLine(string label, string value) => $"{"  " + label,-22}{value}";
+
+    [Fact]
+    public void StatusWithoutAHostTokenPointsAtTheIdentityBlock()
     {
         Assert.Equal(ExitCodes.NoHostToken, Commands.Status(options, null));
 
-        Assert.Contains("No host token", stdout.ToString());
+        var output = stdout.ToString();
+        Assert.Contains("No host token", output);
+        Assert.Contains("identity: block", output);
+        Assert.Contains("HV-HOST-01", output);
+    }
+
+    [Fact]
+    public void StatusReportsATokenFromARefresherWithoutIdentity()
+    {
+        kvp.Token = host.CreateToken(c =>
+        {
+            c.Remove(ProofClaimNames.Tenant);
+            c.Remove(ProofClaimNames.AssignedId);
+            c.Remove(ProofClaimNames.SecurityTags);
+        });
+
+        Assert.Equal(ExitCodes.Failed, Commands.Status(options, null));
+
+        var output = stdout.ToString();
+        Assert.Contains(StatusLine("Subject", "(none)"), output);
+        Assert.Contains("no tenant or assigned_id", output);
+    }
+
+    [Fact]
+    public void StatusReportsIdentityTheIssuerWillRefuse()
+    {
+        kvp.Token = host.CreateToken(c => c[ProofClaimNames.Tenant] = "ACME");
+
+        Assert.Equal(ExitCodes.Failed, Commands.Status(options, null));
+
+        Assert.Contains("identity claims break the rules", stdout.ToString());
     }
 
     [Fact]

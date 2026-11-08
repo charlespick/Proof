@@ -5,7 +5,10 @@ using Proof.Shared;
 
 namespace Proof.Issuer;
 
-/// <summary>Mints the audience-specific JWT.</summary>
+/// <summary>
+/// Mints the audience-specific JWT. The tenant, assigned ID and VM ID are claims of their own as well as parts of
+/// <c>sub</c>, so consumers that map claims never need to parse the subject.
+/// </summary>
 public sealed class TokenMinter(SigningKeys keys, IOptions<IssuerOptions> options, TimeProvider time)
 {
     private readonly JsonWebTokenHandler handler = new() { SetDefaultTimesOnTokenCreation = false };
@@ -19,17 +22,16 @@ public sealed class TokenMinter(SigningKeys keys, IOptions<IssuerOptions> option
         {
             [JwtRegisteredClaimNames.Sub] = identity.Subject,
             [JwtRegisteredClaimNames.Jti] = ProofTokenIds.NewJti(),
+            [ProofClaimNames.Tenant] = identity.Identity.Tenant,
+            [ProofClaimNames.AssignedId] = identity.Identity.AssignedId,
+            [ProofClaimNames.VmId] = identity.VmId,
+            [ProofClaimNames.SecurityTags] = identity.Identity.SecurityTags.ToArray(),
             [ProofClaimNames.Host] = identity.Host,
         };
 
         if (identity.VmName is not null)
         {
             claims[ProofClaimNames.VmName] = identity.VmName;
-        }
-
-        if (identity.Cluster is not null)
-        {
-            claims[ProofClaimNames.Cluster] = identity.Cluster;
         }
 
         return handler.CreateToken(new SecurityTokenDescriptor

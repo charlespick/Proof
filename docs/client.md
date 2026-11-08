@@ -84,7 +84,7 @@ On Windows, a scheduled task that repeats every two minutes does the same job.
 | `--wait <seconds>` | Wait for the host's token to arrive. Useful early in boot, since a VM can start before the host has written one |
 | `--config <path>` | Use a different settings file |
 
-Exit codes: `0` success, `1` failure, `2` bad usage, `3` the host has not written a token yet (retry shortly).
+Exit codes: `0` success, `1` failure, `2` bad usage, `3` the host has not written a token (retry shortly, or see below).
 
 ### Troubleshooting
 
@@ -92,9 +92,9 @@ Exit codes: `0` success, `1` failure, `2` bad usage, `3` the host has not writte
 proof status
 ```
 
-shows whether the host's token has arrived and whether it is valid, without printing it. It reports a missing `hv_kvp_daemon` on Linux, and common problems such as an expired token or a clock that is behind the host's. When the issuer refuses a request, `proof` explains what it can see; the issuer's own log has the definitive reason.
+shows whether the host's token has arrived and whether it is valid, without printing it. It also shows the identity the token carries: the subject the issuer will put in `sub`, the tenant, the assigned ID and the security tags. It reports a missing `hv_kvp_daemon` on Linux, and common problems such as an expired token, a clock that is behind the host's, or a token from a host whose refresher is older than the issuer. When the issuer refuses a request, `proof` explains what it can see; the issuer's own log has the definitive reason.
 
-If `proof` reports no host token, check that the refresher is running on the host, that the host's key is on the issuer's allowlist, and that the VM has Data Exchange enabled.
+If `proof` reports no host token, first check that the VM's notes have an [`identity:` block](refresher.md#vm-identity). The host writes a token only for VMs that have one, so without it there is no token by design. On the host, `proof-refresher metadata show --vm <name>` shows the identity it reads or says why the block can't be used. If the block is fine, check that the refresher is running on the host and that the VM has Data Exchange enabled.
 
 ## Instance metadata
 

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 using Proof.Shared;
@@ -8,12 +9,15 @@ namespace Proof.Client;
 /// What a host token says, read without verifying it. Only the issuer holds the host allowlist, so the client cannot
 /// verify host tokens; this is for status output and for explaining a refusal, never for trusting anything.
 /// </summary>
+/// <param name="SecurityTags">The tags, or null if the token has no array of them.</param>
 public sealed record HostTokenInfo(
     int Length,
     string? Type,
     string? Kid,
     string Host,
-    string? Cluster,
+    string? Tenant,
+    string? AssignedId,
+    IReadOnlyList<string>? SecurityTags,
     string Audience,
     string VmId,
     string? VmName,
@@ -52,7 +56,9 @@ public sealed record HostTokenInfo(
             jwt.Typ,
             jwt.Kid,
             jwt.Issuer,
-            Claim(jwt, ProofClaimNames.Cluster),
+            Claim(jwt, ProofClaimNames.Tenant),
+            Claim(jwt, ProofClaimNames.AssignedId),
+            Tags(jwt),
             jwt.Audiences.FirstOrDefault() ?? "",
             jwt.Subject,
             Claim(jwt, ProofClaimNames.VmName),
@@ -62,7 +68,32 @@ public sealed record HostTokenInfo(
             Time(jwt.ValidTo));
     }
 
+    /// <summary>The security tags, from the payload itself: an array claim of strings, as the refresher writes it.</summary>
+    private static string[]? Tags(JsonWebToken jwt)
+    {
+        try
+        {
+            using var payload = JsonDocument.Parse(Base64UrlEncoder.DecodeBytes(jwt.EncodedPayload));
+            return payload.RootElement.TryGetProperty(ProofClaimNames.SecurityTags, out var tags)
+                && tags.ValueKind == JsonValueKind.Array
+                && tags.EnumerateArray().All(t => t.ValueKind == JsonValueKind.String)
+                    ? tags.EnumerateArray().Select(t => t.GetString()!).ToArray()
+                    : null;
+        }
+        catch (Exception ex) when (ex is JsonException or FormatException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
     public bool IsExpired(DateTimeOffset now) => now >= Expires;
+
+    /// <summary>The identity the token carries, or null if its claims are missing or not ones the issuer accepts.</summary>
+    public VmIdentity? Identity =>
+        SecurityTags is not null && VmIdentity.TryCreate(Tenant, AssignedId, SecurityTags, out var identity, out _) ? identity : null;
+
+    /// <summary>The <c>sub</c> the issuer will give this VM, or null if it will refuse the token's identity.</summary>
+    public string? Subject => Identity is { } identity ? ProofSubjects.For(identity, VmId) : null;
 
     /// <summary>Reasons the issuer will refuse this token, as far as the VM can tell.</summary>
     public IEnumerable<string> Problems(DateTimeOffset now, string? issuerUrl)
@@ -70,6 +101,17 @@ public sealed record HostTokenInfo(
         if (Type != ProofTokenTypes.HostToken)
         {
             yield return $"It is not a Proof host token (typ {Type ?? "missing"}).";
+        }
+
+        if (Tenant is null || AssignedId is null)
+        {
+            yield return $"It has no {ProofClaimNames.Tenant} or {ProofClaimNames.AssignedId}, which the issuer requires. "
+                + $"proof-refresher on {Display.Name(Host)} may be older than the issuer.";
+        }
+        else if (Identity is null)
+        {
+            yield return "Its identity claims break the rules the issuer holds them to. "
+                + $"proof-refresher on {Display.Name(Host)} may be older or newer than the issuer.";
         }
 
         if (Expires == DateTimeOffset.MinValue)

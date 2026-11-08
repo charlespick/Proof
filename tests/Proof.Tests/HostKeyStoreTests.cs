@@ -68,7 +68,7 @@ public sealed class HostKeyStoreTests : IDisposable
             + $"      - kid: {signer.Kid}\n        status: active\n"
             + $"        jwk: {{ kty: EC, crv: P-256, x: {signer.Jwk.X}, y: {signer.Jwk.Y} }}\n"));
 
-        var result = await issuer.ValidateAsync(signer.Sign(new VirtualMachine(TestHost.VmId, "web01"), DateTimeOffset.UtcNow).Token);
+        var result = await issuer.ValidateAsync(signer.Sign(new VirtualMachine(TestHost.VmId, "web01", null), TestHost.Identity(), DateTimeOffset.UtcNow).Token);
         Assert.True(result.IsValid, result.Failure.ToString());
     }
 
