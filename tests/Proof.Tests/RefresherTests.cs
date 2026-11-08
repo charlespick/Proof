@@ -317,6 +317,77 @@ public sealed class RefresherTests : IDisposable
     }
 
     [Fact]
+    public async Task IdentityThatDoesNotFitIsReportedOnceUntilItChanges()
+    {
+        var tags = string.Join(", ", Enumerable.Range(0, 16).Select(i => $"{i:x}{new string('s', 62)}"));
+        var vm = Web01 with { Notes = Notes.WithIdentity(securityTags: $"[{tags}]") };
+        hyperV.Running.Add(vm);
+        Assert.Equal(VmTokenOutcome.Refused, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+
+        time.Advance(HostTokenPolicy.RefreshInterval);
+
+        // Not signed and reported again on every pass, and a notes edit that keeps it wakes no pass.
+        Assert.Empty((await refresher.RefreshAsync(CancellationToken.None)).Results);
+        Assert.False(refresher.IdentityChanged(vm with { Notes = "Edited.\r\n" + vm.Notes }));
+
+        var fixedVm = hyperV.SetNotes(vm, Notes.WithIdentity());
+        Assert.True(refresher.IdentityChanged(fixedVm));
+        Assert.Equal(VmTokenOutcome.Written, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+    }
+
+    [Fact]
+    public async Task NotesChangeDuringAPassWakesAnother()
+    {
+        // A pass reads B, then the notes go back to A before it writes. Compared with the token last written (A), the
+        // change looks like nothing, but this pass is about to write B.
+        hyperV.Running.Add(Web01);
+        await refresher.RefreshAsync(CancellationToken.None);
+        var b = hyperV.SetNotes(Web01, Notes.WithIdentity(securityTags: "[puppet, admin]"));
+        bool? sawChange = null;
+        hyperV.AfterNextListing = () => sawChange = refresher.IdentityChanged(hyperV.SetNotes(b, Web01.Notes));
+
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        Assert.True(sawChange);
+        Assert.Equal(["puppet", "admin"], (await issuer.ValidateAsync(hyperV.Token(Web01)!)).Identity!.Identity.SecurityTags);
+        await refresher.RefreshAsync(CancellationToken.None);
+        Assert.Equal(TestHost.SecurityTags, (await issuer.ValidateAsync(hyperV.Token(Web01)!)).Identity!.Identity.SecurityTags);
+    }
+
+    [Fact]
+    public async Task NotesChangeForAVmFirstSeenDuringAPassWakesAnother()
+    {
+        // The start event's pass has read the new VM's notes, and the VM is not yet in this process's state.
+        bool? sawChange = null;
+        hyperV.Running.Add(Bare01);
+        hyperV.AfterNextListing = () => sawChange = refresher.IdentityChanged(hyperV.SetNotes(Bare01, Notes.WithIdentity(assignedId: "bare01")));
+
+        await refresher.RefreshAsync(CancellationToken.None);
+
+        Assert.True(sawChange);
+        Assert.Equal(VmTokenOutcome.Written, Assert.Single((await refresher.RefreshAsync(CancellationToken.None)).Results).Outcome);
+    }
+
+    [Fact]
+    public async Task SigningFailureFailsOnlyThatVm()
+    {
+        // A key that can no longer sign, as when its key storage provider fails.
+        var broken = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var brokenSigner = new HostTokenSigner(broken, Options.Create(new RefresherOptions { IssuerUrl = TestHost.IssuerUrl, HostId = "hv-host-01" }));
+        broken.Dispose();
+        var brokenRefresher = new TokenRefresher(hyperV, brokenSigner, time, services.GetRequiredService<IMeterFactory>(), NullLogger<TokenRefresher>.Instance);
+        hyperV.Kvp[Bare01.Id] = new() { [KvpKeys.Token] = "old" };
+        hyperV.Running.AddRange([Web01, Bare01]);
+
+        var pass = await brokenRefresher.RefreshAsync(CancellationToken.None);
+
+        Assert.Equal(VmTokenOutcome.Failed, pass.Results.Single(r => r.Vm == Web01).Outcome);
+        Assert.Contains(nameof(ObjectDisposedException), pass.Results.Single(r => r.Vm == Web01).Detail);
+        Assert.Equal(VmTokenOutcome.NotEnrolled, pass.Results.Single(r => r.Vm == Bare01).Outcome);
+        Assert.False(hyperV.HasToken(Bare01));
+    }
+
+    [Fact]
     public async Task IdentityChangeIsWrittenAtOnceThoughTheTokenIsNotDue()
     {
         hyperV.Running.Add(Web01);

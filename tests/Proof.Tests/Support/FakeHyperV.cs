@@ -21,13 +21,25 @@ public sealed class FakeHyperV : IHyperVHost
     /// <summary>How many times the VMs were listed: one per refresh pass.</summary>
     public int Listings { get; private set; }
 
+    /// <summary>
+    /// Runs once, the next time the VMs are listed, after the list is taken: as if it happened while a pass was
+    /// working through notes it had already read.
+    /// </summary>
+    public Action? AfterNextListing { get; set; }
+
     public Task<IReadOnlyList<VirtualMachine>> GetRunningVirtualMachinesAsync(CancellationToken cancellationToken)
     {
+        List<VirtualMachine> listed;
         lock (Running)
         {
             Listings++;
-            return Task.FromResult<IReadOnlyList<VirtualMachine>>(Running.ToList());
+            listed = Running.ToList();
         }
+
+        var after = AfterNextListing;
+        AfterNextListing = null;
+        after?.Invoke();
+        return Task.FromResult<IReadOnlyList<VirtualMachine>>(listed);
     }
 
     public Task WriteKvpItemAsync(VirtualMachine vm, string name, string value, CancellationToken cancellationToken)
