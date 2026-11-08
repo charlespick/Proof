@@ -123,9 +123,10 @@ public sealed class WorkerTests : IAsyncDisposable
         await StartWorkerAsync();
         await WaitUntil(() => hyperV.Subscriptions == 1, "the first subscription");
 
-        // A VM that starts while the subscription is down is found by the pass that follows the renewal.
-        hyperV.Subscription!.Drop();
+        // A VM whose start went unseen is found by the pass that follows the renewal. It is added before the drop:
+        // the drop wakes the worker at once, and a pass that ran before the VM was added would leave it for the schedule.
         AddWithoutEvent(Web01);
+        hyperV.Subscription!.Drop();
 
         await WaitUntil(() => hyperV.Subscriptions == 2, "the subscription to be renewed");
         await WaitUntil(() => hyperV.HasToken(Web01), "the pass after renewal");
